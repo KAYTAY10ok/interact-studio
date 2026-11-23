@@ -50,18 +50,22 @@ jobs:
             mingw-w64-ucrt-x86_64-nsis
             mingw-w64-ucrt-x86_64-qt5-base
             mingw-w64-ucrt-x86_64-ripgrep
-      - name: Build and test
+      - name: Configure
         shell: msys2 {0}
         run: |
-          cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/windows --parallel 2
-          ctest --test-dir build/windows --output-on-failure
+          bash tools/windows/check-stage.sh Configure cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Compile
+        shell: msys2 {0}
+        run: bash tools/windows/check-stage.sh Compile cmake --build build/windows --parallel 2
+      - name: Test the application and terminal
+        shell: msys2 {0}
+        run: bash tools/windows/check-stage.sh Tests ctest --test-dir build/windows --output-on-failure
       - name: Package
         shell: msys2 {0}
         run: |
           version=v0.1.0
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="$GITHUB_REF_NAME"; fi
-          bash tools/package-windows.sh build/windows "$version" dist
+          bash tools/windows/check-stage.sh Packaging bash tools/package-windows.sh build/windows "$version" dist
       - uses: actions/upload-artifact@v4
         with:
           name: interact-studio-windows-x86_64
