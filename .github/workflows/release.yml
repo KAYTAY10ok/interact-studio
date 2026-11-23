@@ -57,9 +57,14 @@ jobs:
       - name: Compile
         shell: msys2 {0}
         run: bash tools/windows/check-stage.sh Compile cmake --build build/windows --parallel 2
-      - name: Test the application and terminal
+      - name: Test the application
+        id: desktop
         shell: msys2 {0}
-        run: bash tools/windows/check-stage.sh Tests ctest --test-dir build/windows --output-on-failure
+        run: bash tools/windows/check-stage.sh Desktop ctest --test-dir build/windows --output-on-failure -R '^desktop-launch$'
+      - name: Test the terminal
+        if: success() || steps.desktop.outcome == 'failure'
+        shell: msys2 {0}
+        run: bash tools/windows/check-stage.sh Terminal ctest --test-dir build/windows --output-on-failure -R '^windows-terminal$'
       - name: Package
         shell: msys2 {0}
         run: |
