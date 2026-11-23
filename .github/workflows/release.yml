@@ -60,7 +60,7 @@ jobs:
       - name: Test the application
         id: desktop
         shell: msys2 {0}
-        run: bash tools/windows/check-stage.sh Desktop ctest --test-dir build/windows --output-on-failure -R '^desktop-launch$'
+        run: bash tools/windows/check-stage.sh Desktop ctest --test-dir build/windows --output-on-failure -R '^(desktop-launch|editor|languages|liveserver)$'
       - name: Test the terminal
         if: success() || steps.desktop.outcome == 'failure'
         shell: msys2 {0}

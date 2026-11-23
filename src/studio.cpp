@@ -7,6 +7,8 @@
 #include "quickopen.h"
 #include "buildrun.h"
 #include "definition.h"
+#include "languages.h"
+#include "liveserver.h"
 #include <algorithm>
 #include <QtWidgets>
 #include <QCryptographicHash>
@@ -84,6 +86,15 @@ StudioWindow::StudioWindow(QString root) : accent("#e0ae69") {
     if (restored && !termDock->isHidden()) showTerminal();
 
     navigator->onOpen = [this](QString path){openFile(path);};
+    navigator->onLive = [this](QString path){startLive(path);};
+    navigator->beforeChange = [this](QString path){
+        if (tabs->canChangePath(path)) return true;
+        QMessageBox::information(this,tr("Unsaved files"),
+            tr("Save or close the affected editors before renaming or removing this item."));
+        return false;
+    };
+    navigator->onRenamed = [this](QString oldPath,QString newPath){tabs->pathRenamed(oldPath,newPath);};
+    navigator->onRemoved = [this](QString path){tabs->pathRemoved(path);};
     navigator->onOpenLine = [this](QString path, int line){
         navigateTo(path, line - 1, 0);
     };
@@ -146,7 +157,7 @@ void StudioWindow::buildActions() {
         for (const auto& p : paths) openFile(p);
     });
     command("file.quickOpen",tr("Quick open file…"),"Ctrl+P",[this]{quickOpenFile(this,project,[this](QString p){openFile(p);});});
-    command("edit.complete",tr("Complete word"),"Ctrl+Space",[this]{tabs->completeWord();});
+    command("edit.complete",tr("Show suggestions"),"Ctrl+Space",[this]{tabs->completeWord();});
     command("file.folder",tr("Open workspace…"),"Ctrl+Shift+O",[this]{chooseProject();});
     command("file.save",tr("Save file"),"Ctrl+S",[this]{tabs->save();});
     command("file.saveAs",tr("Save as…"),"Ctrl+Shift+S",[this]{tabs->saveAs();});
@@ -178,6 +189,14 @@ void StudioWindow::buildActions() {
     command("connect.ssh",tr("SSH host or VM…"),"",[this]{showTerminal()->launchSsh();});
     command("task.run",tr("Run workspace task…"),"Ctrl+Return",[this]{runTask();});
     command("task.runFile",tr("Build and run current file"),"F5",[this]{runCurrentFile();});
+    command("live.start",tr("Open with Live Server"),"",[this]{startLive();});
+    command("live.copyUrl",tr("Copy Live Server URL"),"",[this]{
+        if (live && live->isRunning()) {
+            QApplication::clipboard()->setText(live->url().toString(QUrl::FullyEncoded));
+            statusBar()->showMessage(tr("Live Server URL copied"),2200);
+        }
+    })->setEnabled(false);
+    command("live.stop",tr("Stop Live Server"),"",[this]{stopLive();})->setEnabled(false);
     command("app.palette",tr("Command palette"),"Ctrl+Shift+P",[this]{showPalette();});
     command("app.preferences",tr("Preferences…"),"Ctrl+,",[this]{customize->configure();});
     command("extensions.reload",tr("Reload command extensions"),"",[this]{
@@ -204,7 +223,7 @@ void StudioWindow::buildChrome() {
     menu(tr("&File"),{"file.new","file.quickOpen","file.open","file.folder","","file.save","file.saveAs","file.close","","app.quit"});
     menu(tr("&Edit"),{"edit.find","edit.goto","edit.definition","edit.complete","","app.preferences"});
     menu(tr("&View"),{"app.palette","view.files","view.search","view.git","","view.split","view.sidebar","terminal.toggle","","view.saveLayout","view.loadLayout","view.reset"});
-    menu(tr("&Run"),{"task.runFile","task.run","terminal.local","","connect.remoteRefs","connect.github","connect.docker","connect.wsl","connect.ssh"});
+    menu(tr("&Run"),{"task.runFile","task.run","live.start","live.copyUrl","live.stop","","terminal.local","connect.remoteRefs","connect.github","connect.docker","connect.wsl","connect.ssh"});
     extensionMenu = menus->addMenu(tr("E&xtensions")); top->addWidget(menus);
     top->addStretch();
     paletteButton = new QToolButton;
@@ -273,6 +292,14 @@ void StudioWindow::buildChrome() {
     statusBar()->addWidget(studio);
     position = new QLabel; language = new QLabel;
     statusBar()->addPermanentWidget(language); statusBar()->addPermanentWidget(position);
+    liveButton = new QToolButton;
+    liveButton->setObjectName("liveStatus");
+    connect(liveButton,&QToolButton::clicked,this,[this]{
+        if (live && live->isRunning()) stopLive();
+        else startLive();
+    });
+    statusBar()->addPermanentWidget(liveButton);
+    updateLiveControls();
 
     connect(navDock,&QDockWidget::visibilityChanged,this,[this](bool visible){
         for (auto id : {"view.files","view.search","view.git"}) {
@@ -314,7 +341,7 @@ void StudioWindow::toggleSplit() {
         return;
     }
     if (!tabs->currentText()) tabs->newFile();
-    second = new QPlainTextEdit;
+    second = tabs->createSplitView();
     second->setObjectName("splitEditor");
     second->setLineWrapMode(QPlainTextEdit::NoWrap);
     second->setFont(codeFont);
@@ -344,8 +371,7 @@ void StudioWindow::syncState() {
     const QString coordinates = focused ? tr("Ln %1    Col %2").arg(focused->textCursor().blockNumber()+1)
                  .arg(focused->textCursor().positionInBlock()+1) : QString();
     if (position->text()!=coordinates) position->setText(coordinates);
-    QString suffix = QFileInfo(path).suffix().toUpper();
-    const QString format = text ? (suffix.isEmpty()?tr("Plain text"):suffix) + "    ·    UTF-8" : QString();
+    const QString format = text ? editorLanguage(path) + "    ·    UTF-8" : QString();
     if (language->text()!=format) language->setText(format);
     QString title = (path.isEmpty()?label:QFileInfo(path).fileName()) +
             (text && text->document()->isModified()?" *":"") + "   —   " + projectName(project) + "   ·   Interact Studio";
@@ -479,6 +505,44 @@ void StudioWindow::runCurrentFile() {
     });
 }
 
+void StudioWindow::startLive(QString path) {
+    if (path.isEmpty()) {
+        const auto file = tabs->currentPath();
+        const auto suffix = QFileInfo(file).suffix().toLower();
+        if (suffix == "html" || suffix == "htm") {
+            const QString relative = QDir(project).relativeFilePath(file);
+            if (!QDir::isAbsolutePath(relative) && !relative.startsWith("../")) path = file;
+        }
+        if (path.isEmpty()) path = project;
+    }
+    if (!live) live = new LiveServer(this);
+    const auto url = live->start(project,path);
+    updateLiveControls();
+    if (url.isEmpty()) {
+        QMessageBox::information(this,tr("Live Server"),live->errorString());
+        return;
+    }
+    if (QDesktopServices::openUrl(url))
+        statusBar()->showMessage(tr("Live Server · %1").arg(url.toDisplayString()),5000);
+    else
+        statusBar()->showMessage(tr("Browser unavailable. Use “Copy Live Server URL” in the Run menu."),6500);
+}
+
+void StudioWindow::stopLive() {
+    if (live) live->stop();
+    updateLiveControls();
+    statusBar()->showMessage(tr("Live Server stopped"),2400);
+}
+
+void StudioWindow::updateLiveControls() {
+    const bool running = live && live->isRunning();
+    liveButton->setText(running ? tr("Stop Live") : tr("Go Live"));
+    liveButton->setToolTip(running ? tr("Stop Live Server: %1").arg(live->url().toDisplayString()) :
+                                    tr("Open a local HTML preview"));
+    actions["live.copyUrl"]->setEnabled(running);
+    actions["live.stop"]->setEnabled(running);
+}
+
 void StudioWindow::navigateTo(QString path, int line, int column) {
     if (!openFile(std::move(path))) return;
     auto *view = tabs->currentText();
@@ -601,6 +665,7 @@ void StudioWindow::applyAppearance(QFont font, QColor color) {
         QStatusBar::item {border:0;}
         QStatusBar QLabel {font-size:11px;color:#b0b6bb;padding:1px 8px;}
         QLabel#statusBrand {color:%1;font-weight:bold;}
+        QToolButton#liveStatus {color:%1;font-size:11px;padding:1px 7px;}
         QScrollBar:vertical {background:transparent;width:10px;margin:0;}
         QScrollBar:horizontal {background:transparent;height:10px;margin:0;}
         QScrollBar::handle {background:#40454d;border-radius:3px;min-height:16px;min-width:16px;}

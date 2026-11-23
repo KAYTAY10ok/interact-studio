@@ -68,7 +68,7 @@ cat > "$portable/INSTALL.txt" <<'INSTRUCTIONS'
 Interact Studio — Linux x86-64
 
 Debian 12 desktop dependencies:
-    sudo apt install libqt5widgets5 libqtermwidget5-1 qtermwidget5-data git ripgrep
+    sudo apt install libqt5widgets5 libqt5network5 libqtermwidget5-1 qtermwidget5-data git ripgrep
 
 Launch from the extracted folder:
     ./interact-studio
@@ -94,7 +94,7 @@ Version: $version
 Section: devel
 Priority: optional
 Architecture: amd64
-Depends: libc6 (>= 2.36), libstdc++6 (>= 12), libgcc-s1, libqt5widgets5 (>= 5.15), libqt5gui5 (>= 5.15), libqt5core5a (>= 5.15), libqtermwidget5-1 (>= 1.2.0), qtermwidget5-data, git, ripgrep
+Depends: libc6 (>= 2.36), libstdc++6 (>= 12), libgcc-s1, libqt5widgets5 (>= 5.15), libqt5gui5 (>= 5.15), libqt5core5a (>= 5.15), libqt5network5 (>= 5.15), libqtermwidget5-1 (>= 1.2.0), qtermwidget5-data, git, ripgrep
 Installed-Size: $(du -sk "$package/usr" | cut -f1)
 Maintainer: Interact Studio <KAYTAY10ok@users.noreply.github.com>
 Homepage: https://github.com/KAYTAY10ok/interact-studio

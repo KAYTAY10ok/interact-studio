@@ -29,8 +29,18 @@ public:
     void showGit();
     std::function<void(QString)> onOpen;
     std::function<void(QString, int)> onOpenLine;
+    std::function<void(QString)> onLive;
+    std::function<bool(QString)> beforeChange;
+    std::function<void(QString, QString)> onRenamed;
+    std::function<void(QString)> onRemoved;
 
 private:
+    void showFileMenu(const QString &path, const QPoint &screenPosition);
+    bool safeEntry(const QString &path, bool allowRoot = false) const;
+    void createEntry(const QString &parent, bool directory);
+    void renameEntry(const QString &path);
+    void trashEntry(const QString &path);
+    void fileError(const QString &message);
     void search();
     void refreshGit();
     void readStatus();

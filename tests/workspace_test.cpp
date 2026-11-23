@@ -9,11 +9,16 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileSystemModel>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QTemporaryDir>
@@ -50,6 +55,118 @@ QByteArray git(const QDir &project, QStringList args) {
     require(process.waitForFinished() && process.exitStatus() == QProcess::NormalExit &&
             process.exitCode() == 0, "Git fixture command failed");
     return process.readAllStandardOutput();
+}
+
+void testExplorer() {
+    QTemporaryDir fixture;
+    require(fixture.isValid(), "Cannot create explorer fixture");
+    const QString root = fixture.filePath("workspace");
+    require(QDir().mkdir(root), "Cannot create explorer workspace");
+    qputenv("XDG_DATA_HOME", QFile::encodeName(fixture.filePath("data")));
+    require(QDir().mkdir(fixture.filePath("data")), "Cannot isolate fixture Trash");
+
+    Workspace workspace;
+    workspace.resize(320, 300);
+    workspace.setRoot(root);
+    workspace.show();
+    auto *tree = workspace.findChild<QTreeView *>("explorerTree");
+    require(tree, "Cannot find explorer tree");
+    auto *model = qobject_cast<QFileSystemModel *>(tree->model());
+    require(model, "Cannot find explorer model");
+    waitUntil([&] { return tree->rootIndex().isValid(); }, "Explorer did not load root");
+
+    auto menuFor = [&](const QString &path) {
+        QPoint point(2, tree->viewport()->height() - 4);
+        if (!path.isEmpty()) {
+            QModelIndex index;
+            waitUntil([&] { index = model->index(path); return index.isValid(); }, "Explorer did not list path");
+            tree->scrollTo(index);
+            point = tree->visualRect(index).center();
+            require(tree->indexAt(point) == index, "Explorer item not visible for context click");
+        }
+        require(QMetaObject::invokeMethod(tree, "customContextMenuRequested", Q_ARG(QPoint, point)),
+                "Cannot request explorer context menu");
+        auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+        require(menu && menu->objectName() == "explorerContextMenu", "Missing explorer context menu");
+        return QPointer<QMenu>(menu);
+    };
+    auto action = [](QMenu *menu, const char *name) {
+        auto *item = menu->findChild<QAction *>(name);
+        require(item, "Missing explorer action");
+        return item;
+    };
+    auto enterName = [&](const QString &value) {
+        QTimer::singleShot(0, &workspace, [value] {
+            if (auto *dialog = qobject_cast<QInputDialog *>(QApplication::activeModalWidget())) {
+                dialog->setTextValue(value);
+                dialog->accept();
+            }
+        });
+    };
+    auto click = [&](QPointer<QMenu> menu, const char *name) {
+        auto *item = action(menu, name);
+        require(item->isEnabled(), "Explorer action unexpectedly disabled");
+        item->trigger();
+        if (menu) menu->close();
+    };
+
+    auto menu = menuFor({});
+    require(!action(menu, "explorerRename")->isEnabled() && !action(menu, "explorerTrash")->isEnabled(),
+            "Workspace root enabled destructive actions");
+    enterName("preview files");
+    click(menu, "explorerNewFolder");
+    const auto folder = root + "/preview files";
+    require(QFileInfo(folder).isDir(), "Explorer did not create the folder");
+    menu = menuFor(folder);
+    QString opened;
+    workspace.onOpen = [&](QString path) { opened = path; };
+    enterName("site page.html");
+    click(menu, "explorerNewFile");
+    const auto page = folder + "/site page.html";
+    require(QFileInfo(page).isFile() && opened == page, "New file did not open in the editor");
+    tree->expand(model->index(folder));
+    QString live;
+    workspace.onLive = [&](QString path) { live = path; };
+    click(menuFor(page), "explorerLive");
+    require(live == page, "Live server received the wrong file");
+
+    QString renamedFrom, renamedTo, guarded;
+    bool allowMutation = false;
+    workspace.beforeChange = [&](QString path) { guarded = path; return allowMutation; };
+    workspace.onRenamed = [&](QString from, QString to) { renamedFrom = from; renamedTo = to; };
+    const auto renamed = folder + "/index.html";
+    menu = menuFor(page);
+    enterName("index.html");
+    click(menu, "explorerRename");
+    require(guarded == page && renamedFrom.isEmpty() && !QFileInfo::exists(renamed) && QFileInfo::exists(page),
+            "Rename ignored the editor veto");
+    allowMutation = true;
+    menu = menuFor(page);
+    enterName("index.html");
+    click(menu, "explorerRename");
+    require(renamedFrom == page && renamedTo == renamed && QFileInfo::exists(renamed) && !QFileInfo::exists(page),
+            "Rename did not move the file and notify the editor");
+
+    const auto outside = fixture.filePath("outside.html");
+    const auto link = root + "/outside-link.html";
+    writeFile(outside, "outside");
+    require(QFile::link(outside, link), "Unable to seed explorer symlink");
+    menu = menuFor(link);
+    require(!action(menu, "explorerLive")->isEnabled() && !action(menu, "explorerRename")->isEnabled() &&
+                !action(menu, "explorerTrash")->isEnabled(),
+            "Explorer actions allow a symlink escape");
+    menu->close();
+
+    QString removed;
+    workspace.onRemoved = [&](QString path) { removed = path; };
+    menu = menuFor(renamed);
+    QTimer::singleShot(0, &workspace, [] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+            dialog->button(QMessageBox::Yes)->click();
+    });
+    click(menu, "explorerTrash");
+    require(removed == renamed && !QFileInfo::exists(renamed) && QFileInfo::exists(outside),
+            "Trash did not remove only the selected file and notify the editor");
 }
 
 void run() {
@@ -200,7 +317,8 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
         run();
-        puts("PASS workspace: file tree, search navigation, quick open, Git diffs, literal staging, unstaging and commit");
+        testExplorer();
+        puts("PASS workspace: file tree context actions, search navigation, quick open, Git diffs, literal staging, unstaging and commit");
     } catch (const std::exception &e) {
         fprintf(stderr, "FAIL workspace: %s\n", e.what());
         return 1;

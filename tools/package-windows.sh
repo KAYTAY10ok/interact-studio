@@ -26,7 +26,7 @@ install -m 755 "$build/InteractStudio.exe" "$payload/"
 install -m 755 "$platform" "$payload/platforms/"
 printf '[Paths]\nPlugins=.\n' > "$payload/qt.conf"
 install -m 644 "$repo"/{README.md,LICENSE} "$payload/"
-install -m 644 "$repo"/docs/{installation.md,customization.md,design.md,interact-studio.png} "$payload/docs/"
+install -m 644 "$repo"/docs/{installation.md,customization.md,design.md,editor.md,interact-studio.png} "$payload/docs/"
 install -m 644 "$repo/docs/releases/$tag.md" "$payload/docs/RELEASE.md"
 
 # Include the UCRT64 DLLs imported by the executable and qwindows, then

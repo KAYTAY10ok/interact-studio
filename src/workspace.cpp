@@ -1,5 +1,7 @@
 #include "workspace.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -9,16 +11,22 @@
 #include <QFileSystemModel>
 #include <QFontDatabase>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
+#ifdef Q_OS_WIN
+#include <QRegularExpression>
+#endif
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -90,6 +98,26 @@ QString jsonText(const QJsonObject &field) {
     if (field.contains("text")) return field.value("text").toString();
     return QString::fromUtf8(QByteArray::fromBase64(field.value("bytes").toString().toLatin1()));
 }
+
+bool existsEntry(const QString &path) {
+    const QFileInfo info(path);
+    return info.exists() || info.isSymLink();
+}
+
+bool validEntryName(const QString &name) {
+    if (name.trimmed().isEmpty() || name == "." || name == ".." ||
+        name.compare(".git", Qt::CaseInsensitive) == 0 ||
+        name.contains('/') || name.contains('\\') || name.contains(QChar::Null)) return false;
+#ifdef Q_OS_WIN
+    static const QRegularExpression reserved(
+        QStringLiteral("^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\\.|$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression invalid(QStringLiteral("[<>:\"|?*\\x00-\\x1f]"));
+    if (name.endsWith(' ') || name.endsWith('.') || reserved.match(name).hasMatch() ||
+        invalid.match(name).hasMatch()) return false;
+#endif
+    return true;
+}
 }
 
 Workspace::Workspace(QWidget *parent) : QWidget(parent) {
@@ -101,6 +129,7 @@ Workspace::Workspace(QWidget *parent) : QWidget(parent) {
     auto *files = pageLayout(pages_, tr("EXPLORER"));
     folder_ = new QLabel;
     folder_->setTextFormat(Qt::PlainText);
+    folder_->setContextMenuPolicy(Qt::CustomContextMenu);
     files->addWidget(folder_);
     model_ = new QFileSystemModel(this);
     // The provider must outlive the model.
@@ -108,6 +137,7 @@ Workspace::Workspace(QWidget *parent) : QWidget(parent) {
     model_->setIconProvider(icons_.get());
     model_->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
     tree_ = new QTreeView;
+    tree_->setObjectName("explorerTree");
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);
     tree_->setUniformRowHeights(true);
@@ -116,10 +146,20 @@ Workspace::Workspace(QWidget *parent) : QWidget(parent) {
     tree_->setIconSize(QSize(16,16));
     tree_->setSortingEnabled(true);
     tree_->sortByColumn(0, Qt::AscendingOrder);
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     for (int i = 1; i < model_->columnCount(); ++i) tree_->hideColumn(i);
     files->addWidget(tree_);
     connect(tree_, &QTreeView::activated, this, [this](QModelIndex index) {
         if (onOpen && model_->fileInfo(index).isFile()) onOpen(model_->filePath(index));
+    });
+    connect(tree_, &QTreeView::customContextMenuRequested, this, [this](const QPoint &position) {
+        const auto index = tree_->indexAt(position);
+        if (index.isValid()) tree_->setCurrentIndex(index);
+        showFileMenu(index.isValid() ? model_->filePath(index) : directory_,
+                     tree_->viewport()->mapToGlobal(position));
+    });
+    connect(folder_, &QLabel::customContextMenuRequested, this, [this](const QPoint &position) {
+        showFileMenu(directory_, folder_->mapToGlobal(position));
     });
 
     auto *searchLayout = pageLayout(pages_, tr("PROJECT SEARCH"));
@@ -225,7 +265,8 @@ void Workspace::cancel(QProcess *&process) {
 }
 
 void Workspace::setRoot(QString directory) {
-    directory_ = QDir(directory).absolutePath();
+    directory_ = QFileInfo(directory).canonicalFilePath();
+    if (directory_.isEmpty()) directory_ = QDir(directory).absolutePath();
     cancel(searchProcess_);
     cancel(statusProcess_);
     cancel(diffProcess_);
@@ -246,6 +287,147 @@ void Workspace::setRoot(QString directory) {
 void Workspace::showFiles() { pages_->setCurrentIndex(0); }
 void Workspace::showSearch() { pages_->setCurrentIndex(1); query_->setFocus(); query_->selectAll(); }
 void Workspace::showGit() { pages_->setCurrentIndex(2); refreshGit(); }
+
+bool Workspace::safeEntry(const QString &path, bool allowRoot) const {
+    if (directory_.isEmpty() || path.isEmpty()) return false;
+    const QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    const QFileInfo info(absolute);
+    // Reject links in any component, even when they resolve inside this workspace.
+    if (!info.exists() || info.isSymLink() || info.canonicalFilePath() != absolute ||
+        (!info.isDir() && !info.isFile())) return false;
+    if (absolute == directory_) return allowRoot;
+    const QString prefix = directory_.endsWith('/') ? directory_ : directory_ + '/';
+    if (!absolute.startsWith(prefix)) return false;
+    const QString relative = absolute.mid(prefix.size());
+    for (const auto &component : relative.split('/'))
+        if (component.compare(".git", Qt::CaseInsensitive) == 0) return false;
+    return true;
+}
+
+void Workspace::showFileMenu(const QString &path, const QPoint &screenPosition) {
+    if (directory_.isEmpty()) return;
+    const QFileInfo info(path);
+    const bool directory = info.isDir();
+    const QString parent = directory ? path : info.absolutePath();
+    const bool entryAllowed = safeEntry(path, true);
+    const bool canCreate = !gitBusy_ && entryAllowed && safeEntry(parent, true);
+    const bool canModify = !gitBusy_ && entryAllowed && path != directory_;
+
+    auto *menu = new QMenu(tree_);
+    menu->setObjectName("explorerContextMenu");
+    connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+    auto add = [&](const QString &text, const QString &name, bool enabled, auto action) {
+        auto *item = menu->addAction(text, this, action);
+        item->setObjectName(name);
+        item->setEnabled(enabled);
+    };
+    if (info.isFile()) {
+        add(tr("Open in editor"), "explorerOpen", entryAllowed && bool(onOpen), [this, path] {
+            if (onOpen && safeEntry(path)) onOpen(path);
+        });
+    }
+    const auto suffix = info.suffix().toLower();
+    if (directory || suffix == "html" || suffix == "htm") {
+        add(tr("Open with Live Server"), "explorerLive", entryAllowed && bool(onLive), [this, path] {
+            if (onLive && safeEntry(path, true)) onLive(path);
+        });
+    }
+    if (!menu->isEmpty()) menu->addSeparator();
+    add(tr("New file…"), "explorerNewFile", canCreate, [this, parent] { createEntry(parent, false); });
+    add(tr("New folder…"), "explorerNewFolder", canCreate, [this, parent] { createEntry(parent, true); });
+    add(tr("Rename…"), "explorerRename", canModify, [this, path] { renameEntry(path); });
+    add(tr("Move to Trash…"), "explorerTrash", canModify, [this, path] { trashEntry(path); });
+    menu->addSeparator();
+    add(tr("Copy path"), "explorerCopyPath", true, [path] {
+        QApplication::clipboard()->setText(QDir::toNativeSeparators(path));
+    });
+    menu->popup(screenPosition);
+}
+
+void Workspace::fileError(const QString &message) {
+    QMessageBox box(QMessageBox::Warning, tr("Explorer"), message, QMessageBox::Ok, this);
+    box.setTextFormat(Qt::PlainText);
+    box.exec();
+}
+
+void Workspace::createEntry(const QString &parent, bool directory) {
+    if (gitBusy_ || !safeEntry(parent, true) || !QFileInfo(parent).isDir()) return;
+    bool accepted = false;
+    const auto name = QInputDialog::getText(this, directory ? tr("New folder") : tr("New file"),
+                                           tr("Name"), QLineEdit::Normal, {}, &accepted);
+    if (!accepted) return;
+    if (gitBusy_ || !safeEntry(parent, true) || !QFileInfo(parent).isDir()) {
+        fileError(tr("The selected folder is unavailable."));
+        return;
+    }
+    if (!validEntryName(name)) {
+        fileError(tr("Enter a valid name within this folder."));
+        return;
+    }
+    const QDir folder(parent);
+    const QString target = folder.filePath(name);
+    if (existsEntry(target)) {
+        fileError(tr("That name is already in use."));
+        return;
+    }
+    if (directory) {
+        if (!folder.mkdir(name)) fileError(tr("Could not create %1").arg(target));
+    } else {
+        QFile file(target);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+            fileError(tr("Could not create %1\n%2").arg(target, file.errorString()));
+            return;
+        }
+        file.close();
+        if (onOpen) onOpen(target);
+    }
+}
+
+void Workspace::renameEntry(const QString &path) {
+    if (gitBusy_ || !safeEntry(path)) return;
+    const QFileInfo info(path);
+    bool accepted = false;
+    const QString name = QInputDialog::getText(this, tr("Rename"), tr("New name"),
+                                               QLineEdit::Normal, info.fileName(), &accepted);
+    if (!accepted || name == info.fileName()) return;
+    if (!validEntryName(name)) {
+        fileError(tr("Enter a valid name within this folder."));
+        return;
+    }
+    QDir folder = info.dir();
+    const QString target = folder.filePath(name);
+    if (existsEntry(target)) {
+        fileError(tr("That name is already in use."));
+        return;
+    }
+    if (beforeChange && !beforeChange(path)) return;
+    if (gitBusy_ || !safeEntry(path) || !folder.rename(info.fileName(), name)) {
+        fileError(tr("Could not rename %1").arg(path));
+        return;
+    }
+    if (onRenamed) onRenamed(path, target);
+}
+
+void Workspace::trashEntry(const QString &path) {
+    if (gitBusy_ || !safeEntry(path)) return;
+    const QString name = QFileInfo(path).fileName();
+    QMessageBox box(QMessageBox::Question, tr("Move to Trash"),
+                    tr("Move \"%1\" to the Trash?").arg(name),
+                    QMessageBox::Yes | QMessageBox::Cancel, this);
+    box.setTextFormat(Qt::PlainText);
+    box.setDefaultButton(QMessageBox::Cancel);
+    if (box.exec() != QMessageBox::Yes || (beforeChange && !beforeChange(path))) return;
+    if (gitBusy_ || !safeEntry(path)) {
+        fileError(tr("The selected item is unavailable."));
+        return;
+    }
+    QFile file(path);
+    if (!file.moveToTrash()) {
+        fileError(tr("Could not move %1 to the Trash.\n%2").arg(path, file.errorString()));
+        return;
+    }
+    if (onRemoved) onRemoved(path);
+}
 
 void Workspace::openResult(QListWidgetItem *item) {
     if (!item) return;

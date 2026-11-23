@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18)
 project(InteractStudio VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
-find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets)
+find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network)
 
 set(studio_sources
     src/buildrun.cpp
@@ -10,6 +10,8 @@ set(studio_sources
     src/definition.cpp
     src/editor.cpp
     src/icons.cpp
+    src/languages.cpp
+    src/liveserver.cpp
     src/quickopen.cpp
     src/studio.cpp
     src/workspace.cpp
@@ -25,7 +27,7 @@ endif()
 add_library(studio_core STATIC ${studio_sources})
 target_compile_features(studio_core PUBLIC cxx_std_17)
 target_include_directories(studio_core PUBLIC src)
-target_link_libraries(studio_core PUBLIC Qt5::Widgets)
+target_link_libraries(studio_core PUBLIC Qt5::Widgets Qt5::Network)
 if(NOT WIN32)
     target_link_libraries(studio_core PUBLIC qtermwidget5)
 endif()
@@ -55,6 +57,13 @@ if(BUILD_TESTING)
     studio_warnings(studio-desktop-test)
     add_test(NAME desktop-launch COMMAND studio-desktop-test)
     set_tests_properties(desktop-launch PROPERTIES TIMEOUT 20)
+    foreach(module IN ITEMS editor languages liveserver)
+        add_executable(studio-${module}-test tests/${module}_test.cpp)
+        target_link_libraries(studio-${module}-test PRIVATE studio_core)
+        studio_warnings(studio-${module}-test)
+        add_test(NAME ${module} COMMAND studio-${module}-test)
+        set_tests_properties(${module} PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endforeach()
     if(WIN32)
         add_executable(studio-terminal-test tests/terminal_win_test.cpp)
         target_link_libraries(studio-terminal-test PRIVATE studio_core)

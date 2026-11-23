@@ -7,6 +7,7 @@
 
 class Customize;
 class Editor;
+class LiveServer;
 class Terminal;
 class Workspace;
 class QAction;
@@ -33,11 +34,12 @@ private:
     Editor *tabs;
     Workspace *navigator;
     Terminal *terminal = nullptr;
+    LiveServer *live = nullptr;
     QDockWidget *navDock, *termDock;
     QSplitter *splitter;
     QPlainTextEdit *second = nullptr;
     QWidget *header;
-    QToolButton *projectButton, *paletteButton;
+    QToolButton *projectButton, *paletteButton, *liveButton;
     QLabel *location, *position, *language, *logo;
     QMenu *extensionMenu;
     QHash<QString, QAction*> actions;
@@ -60,6 +62,9 @@ private:
     void showPalette();
     void runTask();
     void runCurrentFile();
+    void startLive(QString path = {});
+    void stopLive();
+    void updateLiveControls();
     void navigateTo(QString path, int line, int column);
     void findDefinition();
     void saveLayout();

@@ -1,5 +1,6 @@
 #include "editor.h"
 #include "fonts.h"
+#include "languages.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -7,8 +8,10 @@
 #include <QScrollBar>
 #include <QStringListModel>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -17,11 +20,15 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QSaveFile>
+#include <QRegularExpression>
 #include <QSet>
 #include <QShortcut>
 #include <QSyntaxHighlighter>
 #include <QTextBlock>
+#include <QTimer>
+#include <algorithm>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -38,80 +45,114 @@ QByteArray digest(const QByteArray &data) {
     return QCryptographicHash::hash(data, QCryptographicHash::Sha256);
 }
 
-enum class Mode { Plain, CLike, Hash, Json, Markdown, Lisp };
-Mode fileMode(const QString &path) {
-    const QString ext = QFileInfo(path).suffix().toLower();
-    if (QStringList{"h","hpp","c","cc","cpp","rs","js","jsx","ts","tsx","go","java","cs","css","swift","kt"}.contains(ext)) return Mode::CLike;
-    if (QStringList{"py","sh","bash","toml","yaml","yml","rb","cmake"}.contains(ext) || QFileInfo(path).fileName() == "Makefile") return Mode::Hash;
-    if (ext == "json") return Mode::Json;
-    if (ext == "md" || ext == "markdown") return Mode::Markdown;
-    if (ext == "el" || ext == "lisp" || ext == "scm") return Mode::Lisp;
-    return Mode::Plain;
+bool identifier(QChar ch) {
+    return ch.isLetterOrNumber() || ch.isMark() || ch == '_';
 }
 
-class Colorizer final : public QSyntaxHighlighter {
-public:
-    explicit Colorizer(QPlainTextEdit *view) : QSyntaxHighlighter(view->document()), view(view) {}
-    Mode mode = Mode::Plain;
-private:
-    QPlainTextEdit *view;
-    void highlightBlock(const QString &line) override {
-        if (mode == Mode::Plain) return;
-        const int end = qMin(line.size(), 12000);
-        const bool light = view->palette().base().color().lightness() > 145;
-        const QColor comment(light ? "#506555" : "#85938d");
-        const QColor literal(light ? "#397248" : "#b1cb91");
-        const QColor keyword(light ? "#824876" : "#ce9fce");
-        const QColor number(light ? "#965020" : "#e4b878");
-        const QColor call(light ? "#226879" : "#88c9cb");
-        if (mode == Mode::Markdown) {
-            if (line.startsWith('#')) setFormat(0, end, call);
-            else if (line.startsWith('>') || line.startsWith("```")) setFormat(0, end, comment);
-            return;
+QString leadingIndent(const QString &text) {
+    int i = 0;
+    while (i < text.size() && (text.at(i) == ' ' || text.at(i) == '\t')) ++i;
+    return text.left(i);
+}
+
+QString codeBeforeComment(const QString &line, const QString &language) {
+    static const QSet<QString> hash = {"python", "shell", "yaml", "toml", "ruby", "makefile",
+        "dockerfile", "cmake", "perl", "r"};
+    static const QSet<QString> other = {"plain text", "markdown", "html", "xml", "css", "json"};
+    QString marker;
+    if (hash.contains(language)) marker = "#";
+    else if (language == "lua" || language == "sql") marker = "--";
+    else if (language.contains("lisp") || language == "scheme" || language == "clojure") marker = ";";
+    else if (!other.contains(language)) marker = "//";
+    if (marker.isEmpty()) return line.trimmed();
+
+    QChar quote;
+    for (int i = 0; i < line.size(); ++i) {
+        const auto ch = line.at(i);
+        if (!quote.isNull()) {
+            if (ch == '\\' && i + 1 < line.size()) ++i;
+            else if (ch == quote) quote = QChar();
+        } else if (ch == '\'' || ch == '"' || ch == '`') {
+            quote = ch;
+        } else if (line.midRef(i, marker.size()) == marker) {
+            return line.left(i).trimmed();
         }
-        static const QSet<QString> words = {
-            "fn","let","mut","struct","impl","trait","match","enum","pub","use","mod","as",
-            "const","constexpr","class","return","if","else","for","while","break","continue",
-            "include","import","from","using","export","public","private","protected","type",
-            "function","def","async","await","new","auto","int","void","bool","true","false",
-            "null","None","True","False","static","self","this","switch","case","throw","try",
-            "catch","namespace","template","typename","virtual","override","in","lambda","defun","setq"
-        };
-        bool blockComment = previousBlockState() == 1 && mode == Mode::CLike;
-        int i = 0;
-        while (i < end) {
-            const int start = i;
-            const QChar ch = line.at(i);
-            const QChar next = i + 1 < end ? line.at(i + 1) : QChar();
-            if (blockComment || (mode == Mode::CLike && ch == '/' && next == '*')) {
-                int stop = line.indexOf("*/", i + (blockComment ? 0 : 2));
-                blockComment = stop < 0;
-                i = blockComment ? end : qMin(end, stop + 2);
-                setFormat(start, i - start, comment);
-            } else if ((mode == Mode::CLike && ch == '/' && next == '/') ||
-                       (mode == Mode::Hash && ch == '#') || (mode == Mode::Lisp && ch == ';')) {
-                setFormat(i, end - i, comment);
-                break;
-            } else if (ch == '"' || ch == '\'' || ch == '`') {
-                ++i;
-                while (i < end) {
-                    QChar c = line.at(i++);
-                    if (c == '\\' && i < end) ++i;
-                    else if (c == ch) break;
-                }
-                setFormat(start, i - start, literal);
-            } else if (ch.isDigit()) {
-                while (++i < end && (line.at(i).isLetterOrNumber() || line.at(i) == '.' || line.at(i) == '_')) {}
-                setFormat(start, i - start, number);
-            } else if (ch.isLetter() || ch == '_') {
-                while (++i < end && (line.at(i).isLetterOrNumber() || line.at(i) == '_')) {}
-                if (words.contains(line.mid(start, i - start))) setFormat(start, i - start, keyword);
-                else if (i < end && line.at(i) == '(') setFormat(start, i - start, call);
-            } else ++i;
-        }
-        setCurrentBlockState(blockComment ? 1 : 0);
     }
-};
+    return line.trimmed();
+}
+
+int preferredWidth(const QString &language) {
+    static const QSet<QString> twoSpaces = {"html", "xml", "css", "scss", "sass", "less", "javascript",
+        "typescript", "javascript react", "typescript react", "json", "yaml", "ruby", "lua", "vue", "svelte"};
+    return twoSpaces.contains(language) ? 2 : 4;
+}
+
+QString indentStep(const QTextBlock &current, const QString &indent, const QString &language) {
+    if (language == "makefile" || indent.contains('\t')) return "\t";
+    int smallest = 0;
+    auto block = current;
+    for (int i = 0; i < 32 && block.isValid(); ++i, block = block.previous()) {
+        if (block.length() > 4096) continue;
+        const auto text = block.text();
+        const auto previous = leadingIndent(text);
+        if (previous.size() == text.size() || previous.isEmpty()) continue;
+        if (previous.startsWith('\t')) return indent.isEmpty() ? QString("\t") : QString(preferredWidth(language), ' ');
+        if (previous.size() <= 8 && (smallest == 0 || previous.size() < smallest))
+            smallest = previous.size();
+    }
+    return QString(smallest == 2 || smallest == 4 || smallest == 8 ? smallest : preferredWidth(language), ' ');
+}
+
+QString openingTag(const QString &code, const QString &language) {
+    static const QSet<QString> markup = {"html", "xml", "javascript react", "typescript react", "vue", "svelte"};
+    if (!markup.contains(language)) return {};
+    static const QRegularExpression tag(R"(<([A-Za-z][\w.:\-]*)(?:\s[^<>]*)?>$)");
+    const auto match = tag.match(code);
+    if (!match.hasMatch() || code.endsWith("/>")) return {};
+    const auto name = match.captured(1);
+    static const QSet<QString> empty = {"area", "base", "br", "col", "embed", "hr", "img",
+        "input", "link", "meta", "param", "source", "track", "wbr"};
+    return language != "xml" && empty.contains(name.toLower()) ? QString() : name;
+}
+
+struct Snippet { const char *trigger; const char *description; const char *body; };
+QList<Snippet> snippetsFor(const QString &language) {
+    if (language == "html") return {
+        {"html", "Document skeleton", "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Page</title>\n</head>\n<body>\n  \v\n</body>\n</html>"},
+        {"div", "Container element", "<div>\v</div>"},
+        {"script", "Script element", "<script>\n  \v\n</script>"},
+    };
+    if (language == "python") return {
+        {"def", "Function definition", "def function():\n    \vpass"},
+        {"for", "For loop", "for item in items:\n    \vpass"},
+        {"ifmain", "Module entry point", "if __name__ == \"__main__\":\n    \vmain()"},
+    };
+    if (language == "javascript" || language == "typescript" || language.endsWith(" react")) return {
+        {"func", "Function definition", "function name() {\n  \v\n}"},
+        {"forof", "For-of loop", "for (const item of items) {\n  \v\n}"},
+        {"log", "Console output", "console.log(\v);"},
+    };
+    if (language == "c" || language == "c++") return {
+        {"main", "Program entry point", "int main() {\n    \vreturn 0;\n}"},
+        {"fori", "Index loop", "for (int i = 0; i < count; ++i) {\n    \v\n}"},
+    };
+    if (language == "rust") return {
+        {"main", "Program entry point", "fn main() {\n    \v\n}"},
+        {"println", "Formatted output", "println!(\"\v\");"},
+    };
+    return {};
+}
+
+bool underPath(const QString &candidate, const QString &path) {
+    if (candidate.isEmpty() || path.isEmpty()) return false;
+#if defined(Q_OS_WIN)
+    constexpr auto sensitivity = Qt::CaseInsensitive;
+#else
+    constexpr auto sensitivity = Qt::CaseSensitive;
+#endif
+    return candidate.compare(path,sensitivity) == 0 ||
+        candidate.startsWith(path.endsWith('/') ? path : path + '/', sensitivity);
+}
 
 class TextView;
 class Gutter final : public QWidget {
@@ -123,7 +164,7 @@ public:
 
 class TextView final : public QPlainTextEdit {
 public:
-    Colorizer *colorizer = nullptr;
+    QSyntaxHighlighter *colorizer = nullptr;
     explicit TextView(QWidget *parent) : QPlainTextEdit(parent), gutter(new Gutter(this)) {
         setFrameStyle(QFrame::NoFrame);
         setLineWrapMode(NoWrap);
@@ -133,40 +174,81 @@ public:
             if (dy) gutter->scroll(0, dy);
             else gutter->update(0, rect.y(), gutter->width(), rect.height());
         });
-        connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this]{ markLine(); });
+        connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+            markLine();
+            if (textCursor().position() != suggestionPosition) dismissSuggestions();
+        });
+        suggestTimer.setSingleShot(true);
+        suggestTimer.setInterval(130);
+        connect(&suggestTimer, &QTimer::timeout, this, [this] {
+            if (hasFocus()) completeWord(false);
+        });
         updateMetrics();
         markLine();
     }
-    void completeWord() {
-        auto cursor = textCursor();
-        if (cursor.hasSelection()) return;
-        const auto identifier = [](QChar c) { return c.isLetterOrNumber() || c == '_'; };
+    void setLanguagePath(const QString &path) {
+        const QString previous = document()->property("interactLanguagePath").toString();
+        if (previous == path && colorizer) return;
+        delete colorizer;
+        document()->setProperty("interactLanguagePath",path);
+        colorizer = createLanguageHighlighter(this,path);
+        dismissSuggestions();
+    }
+
+    void completeWord(bool explicitRequest = true) {
+        if (isReadOnly()) return;
+        const auto cursor = textCursor();
+        if (cursor.hasSelection() || cursor.block().length() > 16384) return;
         const QString line = cursor.block().text();
         int start = cursor.positionInBlock();
-        while (start > 0 && identifier(line[start - 1])) --start;
+        while (start > 0 && identifier(line.at(start - 1))) --start;
         const QString prefix = line.mid(start, cursor.positionInBlock() - start);
-        if (prefix.isEmpty()) return;
+        if (prefix.size() > 150 || (!explicitRequest && prefix.size() < 2)) return;
 
-        // Completion is explicit and bounded, even for minified sources.
-        QSet<QString> candidates;
-        const int first = qMax(0, cursor.blockNumber() - 250);
-        const int last = qMin(blockCount() - 1, cursor.blockNumber() + 250);
-        int remaining = 512 * 1024;
+        QStringList quick;
+        const QString path = languagePath();
+        snippetBodies.clear();
+        for (const auto &snippet : snippetsFor(languageName())) {
+            const QString trigger = QString::fromLatin1(snippet.trigger);
+            if (!trigger.startsWith(prefix)) continue;
+            const QString label = trigger + "  ·  " + tr(snippet.description);
+            quick << label;
+            snippetBodies.insert(label,QString::fromLatin1(snippet.body));
+        }
+        QSet<QString> keywords;
+        for (const auto &word : languageCompletions(path)) {
+            if (word.size() > prefix.size() && word.startsWith(prefix)) keywords.insert(word);
+        }
+
+        // Track nearby identifiers without scanning the full document per key.
+        QSet<QString> local;
+        const int first = qMax(0,cursor.blockNumber() - 60);
+        const int last = qMin(blockCount()-1,cursor.blockNumber() + 60);
+        int budget = 64 * 1024;
         for (auto block = document()->findBlockByNumber(first);
-             block.isValid() && block.blockNumber() <= last && remaining > 0; block = block.next()) {
-            if (block.length() > 16384) continue;
-            const QString content = block.text();
-            remaining -= content.size();
-            for (int pos = 0; pos < content.size();) {
-                if (!identifier(content[pos])) { ++pos; continue; }
-                int begin = pos++;
-                while (pos < content.size() && identifier(content[pos])) ++pos;
-                if (pos - begin <= prefix.size() || pos - begin > 150) continue;
-                if (content.midRef(begin, prefix.size()) == prefix)
-                    candidates.insert(content.mid(begin, pos - begin));
+             !prefix.isEmpty() && block.isValid() && block.blockNumber() <= last && budget > 0;
+             block = block.next()) {
+            if (block.length() > 8192 || block.length() > budget) continue;
+            const QString contents = block.text();
+            budget -= contents.size();
+            for (int pos = 0; pos < contents.size();) {
+                if (!identifier(contents.at(pos))) { ++pos; continue; }
+                int token = pos++;
+                while (pos < contents.size() && identifier(contents.at(pos))) ++pos;
+                if (block == cursor.block() && token == start) continue;
+                const int size = pos - token;
+                if (size > prefix.size() && size <= 150 && contents.midRef(token,prefix.size()) == prefix)
+                    local.insert(contents.mid(token,size));
             }
         }
-        if (candidates.isEmpty()) return;
+        local.subtract(keywords);
+        auto sorted = [](const QSet<QString> &items) {
+            QStringList result = items.values();
+            result.sort();
+            return result;
+        };
+        quick << sorted(local) << sorted(keywords);
+        if (quick.isEmpty()) { dismissSuggestions(); return; }
 
         if (!completer) {
             completer = new QCompleter(this);
@@ -175,30 +257,20 @@ public:
             completer->setWidget(this);
             completer->setCaseSensitivity(Qt::CaseSensitive);
             completer->setCompletionMode(QCompleter::PopupCompletion);
-            connect(completer, QOverload<const QString &>::of(&QCompleter::activated), this,
-                    [this](const QString &word) {
-                auto cursor = textCursor();
-                // Accept only the prefix still immediately before the caret.
-                const QString prefix = completer->completionPrefix();
-                if (!cursor.block().text().left(cursor.positionInBlock()).endsWith(prefix)) return;
-                int right = cursor.positionInBlock();
-                const QString line = cursor.block().text();
-                while (right < line.size() && (line[right].isLetterOrNumber() || line[right] == '_')) ++right;
-                const int anchor = cursor.position();
-                cursor.setPosition(anchor - prefix.size());
-                cursor.setPosition(cursor.block().position() + right, QTextCursor::KeepAnchor);
-                cursor.insertText(word);
-                setTextCursor(cursor);
-            });
+            completer->setMaxVisibleItems(9);
+            connect(completer,QOverload<const QString &>::of(&QCompleter::activated),this,
+                    [this](const QString &choice) { acceptCompletion(choice); });
         }
-        QStringList sorted = candidates.values();
-        sorted.sort();
-        completions->setStringList(sorted);
+        suggestionPosition = cursor.position();
+        suggestionRevision = document()->revision();
+        suggestionDocument = document();
+        completions->setStringList(quick.mid(0,80));
         completer->setCompletionPrefix(prefix);
         completer->setCurrentRow(0);
         auto bounds = cursorRect();
-        bounds.setWidth(qMin(420, completer->popup()->sizeHintForColumn(0) + 26));
+        bounds.setWidth(qBound(180,completer->popup()->sizeHintForColumn(0) + 28,450));
         completer->complete(bounds);
+        completer->popup()->setCurrentIndex(completer->currentIndex());
     }
     void updateMetrics() {
         const int digits = qMax(3, QString::number(blockCount()).size());
@@ -230,6 +302,11 @@ private:
     Gutter *gutter;
     QCompleter *completer = nullptr;
     QStringListModel *completions = nullptr;
+    QTimer suggestTimer;
+    QHash<QString, QString> snippetBodies;
+    int suggestionPosition = -1;
+    int suggestionRevision = -1;
+    QPointer<QTextDocument> suggestionDocument;
     int leftMargin = 0;
     void markLine() {
         QTextEdit::ExtraSelection sel;
@@ -254,30 +331,131 @@ private:
             if (colorizer) colorizer->rehighlight();
         }
     }
+    QString languagePath() const {
+        return document()->property("interactLanguagePath").toString();
+    }
+
+    QString languageName() const {
+        const auto path = languagePath();
+        const auto extension = QFileInfo(path).suffix().toLower();
+        if (extension == "jsx") return "javascript react";
+        if (extension == "tsx") return "typescript react";
+        return editorLanguage(path).toLower();
+    }
+
+    void dismissSuggestions() {
+        suggestTimer.stop();
+        if (completer) completer->popup()->hide();
+    }
+
+    void acceptCompletion(const QString &choice) {
+        auto cursor = textCursor();
+        if (choice.isEmpty() || cursor.hasSelection() || cursor.position() != suggestionPosition ||
+                suggestionDocument != document() || document()->revision() != suggestionRevision) return;
+        const QString prefix = completer->completionPrefix();
+        const QString line = cursor.block().text();
+        if (cursor.positionInBlock() < prefix.size() ||
+                line.midRef(cursor.positionInBlock() - prefix.size(),prefix.size()) != prefix) return;
+        int right = cursor.positionInBlock();
+        while (right < line.size() && identifier(line.at(right))) ++right;
+        const int from = cursor.position() - prefix.size();
+        QString text = snippetBodies.value(choice,choice);
+        text.replace("\n","\n" + leadingIndent(line));
+        const int caret = text.indexOf(QChar('\v'));
+        if (caret >= 0) text.remove(caret,1);
+        cursor.beginEditBlock();
+        cursor.setPosition(from);
+        cursor.setPosition(cursor.block().position() + right,QTextCursor::KeepAnchor);
+        cursor.insertText(text);
+        if (caret >= 0) cursor.setPosition(from + caret);
+        cursor.endEditBlock();
+        dismissSuggestions();
+        setTextCursor(cursor);
+    }
+
+    void insertNewline() {
+        auto cursor = textCursor();
+        const QString line = cursor.block().text();
+        const QString left = line.left(cursor.positionInBlock());
+        const QString right = line.mid(cursor.positionInBlock());
+        const QString indent = leadingIndent(left);
+        const QString language = languageName();
+        const auto code = codeBeforeComment(left,language);
+        const auto trailing = right.trimmed();
+        const QString tag = openingTag(code,language);
+        const QChar token = code.isEmpty() ? QChar() : code.back();
+        const bool structure = language != "markdown" && (language != "plain text" || token == '{');
+        const QString openers = "{[(";
+        const int pair = structure ? openers.indexOf(token) : -1;
+        const bool bracket = pair >= 0;
+        const bool nestedColon = (language == "python" || language == "yaml") && token == ':';
+        const bool makeTarget = language == "makefile" && !indent.startsWith('\t') &&
+            code.contains(':') && !code.contains('=') && !code.startsWith('#');
+        static const QRegularExpression blockWord(R"(\b(?:then|do|function|else|begin|repeat)\s*$)");
+        const bool wordBlock = QStringList{"shell","lua","ruby"}.contains(language) && code.contains(blockWord);
+        const bool grow = !tag.isEmpty() || bracket || nestedColon || makeTarget || wordBlock;
+        const bool hasClosing = !cursor.hasSelection() &&
+            ((bracket && trailing.startsWith(QString("}])").at(pair))) ||
+             (!tag.isEmpty() && trailing.startsWith("</" + tag + ">",
+                language == "xml" ? Qt::CaseSensitive : Qt::CaseInsensitive)));
+
+        cursor.beginEditBlock();
+        cursor.insertText("\n" + indent + (grow ? indentStep(cursor.block(),indent,language) : QString()));
+        if (hasClosing) {
+            const int inner = cursor.position();
+            cursor.setPosition(inner + leadingIndent(right).size(),QTextCursor::KeepAnchor);
+            cursor.insertText("\n" + indent);
+            cursor.setPosition(inner);
+        }
+        cursor.endEditBlock();
+        setTextCursor(cursor);
+    }
+
+    void insertIndent() {
+        auto cursor = textCursor();
+        const auto language = languageName();
+        const auto indentation = leadingIndent(cursor.block().text());
+        const auto step = indentStep(cursor.block(),indentation,language);
+        if (step == "\t") cursor.insertText(step);
+        else cursor.insertText(QString(step.size() - cursor.positionInBlock() % step.size(),' '));
+        setTextCursor(cursor);
+    }
+
     void keyPressEvent(QKeyEvent *e) override {
+        const int key = e->key();
+        const bool simple = !(e->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier));
         if (completer && completer->popup()->isVisible()) {
-            switch (e->key()) {
+            switch (key) {
             case Qt::Key_Tab: case Qt::Key_Enter: case Qt::Key_Return: case Qt::Key_Escape:
+                // QCompleter's popup receives these events before the editor.
+                // Ignore forwarded events so the selected suggestion consumes them.
                 e->ignore();
                 return;
             default:
-                completer->popup()->hide();
+                dismissSuggestions();
             }
         }
-        if (e->key() == Qt::Key_Return && e->modifiers() == Qt::NoModifier && !isReadOnly()) {
-            auto cursor = textCursor();
-            const QString prefix = cursor.block().text().left(cursor.positionInBlock());
-            int indent = 0;
-            while (indent < prefix.size() && (prefix[indent] == ' ' || prefix[indent] == '\t')) ++indent;
-            cursor.beginEditBlock();
-            cursor.insertText("\n" + prefix.left(indent));
-            if (prefix.trimmed().endsWith('{')) cursor.insertText("    ");
-            cursor.endEditBlock();
-            setTextCursor(cursor);
+        if ((key == Qt::Key_Return || key == Qt::Key_Enter) && simple &&
+                !(e->modifiers() & Qt::ShiftModifier) && !isReadOnly() &&
+                textCursor().block().length() <= 16384) {
+            insertNewline();
+            e->accept();
+            return;
+        }
+        if (key == Qt::Key_Tab && simple && !textCursor().hasSelection() && !isReadOnly()) {
+            insertIndent();
+            e->accept();
             return;
         }
         QPlainTextEdit::keyPressEvent(e);
+        const auto text = e->text();
+        // Modifier-based edit commands and navigation never open the popup.
+        if (simple && !isReadOnly() &&
+                ((!text.isEmpty() && identifier(text.back())) || key == Qt::Key_Backspace))
+            suggestTimer.start();
+        else suggestTimer.stop();
     }
+
 };
 
 Gutter::Gutter(TextView *owner) : QWidget(owner), view(owner) {}
@@ -310,8 +488,7 @@ public:
         view = new TextView(this);
         layout->addWidget(view);
         setFocusProxy(view);
-        colorizer = new Colorizer(view);
-        view->colorizer = colorizer;
+        view->setLanguagePath({});
         connect(query, &QLineEdit::returnPressed, this, [this]{ find(false); });
         auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape), search);
         escape->setContext(Qt::WidgetWithChildrenShortcut);
@@ -346,7 +523,6 @@ public:
     }
 
     TextView *view;
-    Colorizer *colorizer;
     QWidget *search;
     QLineEdit *query;
     QString path, untitled;
@@ -438,7 +614,7 @@ bool Editor::openFile(QString path, bool reportError) {
     tab->mixed = mixed;
     tab->checksum = originalDigest;
     tab->newline = pair && pair >= lf && pair >= cr ? "\r\n" : cr > lf ? "\r" : "\n";
-    tab->colorizer->mode = fileMode(path);
+    tab->view->setLanguagePath(path);
     tab->view->setPlainText(normalized);
     tab->view->document()->setModified(false);
     refresh(tab);
@@ -486,10 +662,7 @@ bool Editor::writePage(EditorPage *tab, bool chooseName) {
     tab->path = path;
     tab->checksum = digest(bytes);
     tab->mixed = false;
-    if (fileMode(path) != tab->colorizer->mode) {
-        tab->colorizer->mode = fileMode(path);
-        tab->colorizer->rehighlight();
-    }
+    tab->view->setLanguagePath(path);
     tab->view->document()->setModified(false);
     refresh(tab);
     return true;
@@ -521,6 +694,35 @@ void Editor::closePage(int index) {
 }
 void Editor::closeCurrent() { closePage(currentIndex()); }
 
+bool Editor::canChangePath(const QString &path) const {
+    const QString affected = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    for (int i = 0; i < count(); ++i) {
+        auto *tab = page(i);
+        if (tab->view->document()->isModified() && underPath(tab->path,affected)) return false;
+    }
+    return true;
+}
+
+void Editor::pathRenamed(const QString &oldPath, const QString &newPath) {
+    const QString before = QDir::cleanPath(QFileInfo(oldPath).absoluteFilePath());
+    const QString after = QDir::cleanPath(QFileInfo(newPath).absoluteFilePath());
+    for (int i = 0; i < count(); ++i) {
+        auto *tab = page(i);
+        if (!underPath(tab->path,before)) continue;
+        tab->path = resolvedPath(after + tab->path.mid(before.size()));
+        tab->view->setLanguagePath(tab->path);
+        refresh(tab);
+    }
+}
+
+void Editor::pathRemoved(const QString &path) {
+    const QString affected = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    for (int i = count() - 1; i >= 0; --i) {
+        auto *tab = page(i);
+        if (underPath(tab->path,affected) && !tab->view->document()->isModified()) closePage(i);
+    }
+}
+
 void Editor::findText() {
     auto *tab = page(currentIndex());
     if (!tab) return;
@@ -531,9 +733,18 @@ void Editor::findText() {
     tab->query->selectAll();
 }
 
+QPlainTextEdit *Editor::createSplitView(QWidget *parent) {
+    auto *view = new TextView(parent);
+    view->setFont(editorFont);
+    return view;
+}
+
 void Editor::completeWord() {
     auto *tab = page(currentIndex());
-    if (tab) tab->view->completeWord();
+    if (!tab) return;
+    auto *focused = dynamic_cast<TextView *>(QApplication::focusWidget());
+    auto *view = focused && focused->document() == tab->view->document() ? focused : tab->view;
+    view->completeWord();
 }
 
 void Editor::goToLine() {

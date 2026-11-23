@@ -37,7 +37,7 @@ for package in ./*.deb; do
 done
 arch=$(c++ -print-multiarch)
 lib="$sdk/usr/lib/$arch"
-for component in Core Gui Widgets Test; do
+for component in Core Gui Widgets Network Test; do
     # The -dev package provides a relative symlink to the system runtime.
     soname=$(readlink "$lib/libQt5$component.so")
     test -f "/usr/lib/$arch/$soname"

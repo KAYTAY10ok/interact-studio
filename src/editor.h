@@ -15,9 +15,15 @@ public:
     bool saveAs();
     bool confirmCloseAll();
     void closeCurrent();
+    // Call before changing a file or folder from the explorer, then notify
+    // the editor only if the actual filesystem operation succeeded.
+    bool canChangePath(const QString &path) const;
+    void pathRenamed(const QString &oldPath, const QString &newPath);
+    void pathRemoved(const QString &path);
     QString currentPath() const;
     QStringList openPaths() const;
     QPlainTextEdit *currentText() const;
+    QPlainTextEdit *createSplitView(QWidget *parent = nullptr);
     void findText();
     void completeWord();
     void goToLine();

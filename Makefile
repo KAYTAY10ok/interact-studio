@@ -14,12 +14,12 @@ ifdef INTERACT_SDK
 MULTIARCH := $(shell $(CXX) -print-multiarch)
 SDK_LIB := $(INTERACT_SDK)/usr/lib/$(MULTIARCH)
 QT_PKG := PKG_CONFIG_SYSROOT_DIR=$(INTERACT_SDK) PKG_CONFIG_LIBDIR=$(SDK_LIB)/pkgconfig pkg-config
-CPPFLAGS += -I$(INTERACT_SDK)/usr/include $(shell $(QT_PKG) --cflags Qt5Widgets)
+CPPFLAGS += -I$(INTERACT_SDK)/usr/include $(shell $(QT_PKG) --cflags Qt5Widgets Qt5Network)
 LDFLAGS += -L$(SDK_LIB) -Wl,--disable-new-dtags,-rpath,$(SDK_LIB)
-LDLIBS += -lqtermwidget5 $(shell $(QT_PKG) --libs Qt5Widgets)
+LDLIBS += -lqtermwidget5 $(shell $(QT_PKG) --libs Qt5Widgets Qt5Network)
 else
-CPPFLAGS += $(shell pkg-config --cflags Qt5Widgets)
-LDLIBS += -lqtermwidget5 $(shell pkg-config --libs Qt5Widgets)
+CPPFLAGS += $(shell pkg-config --cflags Qt5Widgets Qt5Network)
+LDLIBS += -lqtermwidget5 $(shell pkg-config --libs Qt5Widgets Qt5Network)
 endif
 
 .PHONY: all check bench
@@ -37,17 +37,19 @@ $(BUILD)/test-%.o: tests/%.cpp | $(BUILD)
 $(BUILD)/interact-studio: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-TESTS := smoke editor_test terminal_test workspace_test customize_test buildrun_test definition_test
+TESTS := smoke editor_test languages_test terminal_test workspace_test customize_test buildrun_test definition_test liveserver_test
 TEST_PROGRAMS := $(addprefix $(BUILD)/,$(TESTS))
 
 $(BUILD)/smoke: $(MODULES)
-$(BUILD)/editor_test $(BUILD)/editor_bench: $(BUILD)/editor.o
+$(BUILD)/editor_test $(BUILD)/editor_bench: $(BUILD)/editor.o $(BUILD)/languages.o
+$(BUILD)/languages_test: $(BUILD)/languages.o
 $(BUILD)/terminal_test: $(BUILD)/terminal.o
 $(BUILD)/workspace_test: $(BUILD)/workspace.o $(BUILD)/quickopen.o
 $(BUILD)/customize_test: $(BUILD)/customize.o
 $(BUILD)/customize_test: LDLIBS += -lQt5Test
 $(BUILD)/buildrun_test: $(BUILD)/buildrun.o
 $(BUILD)/definition_test: $(BUILD)/definition.o
+$(BUILD)/liveserver_test: $(BUILD)/liveserver.o
 
 $(TEST_PROGRAMS) $(BUILD)/editor_bench: $(BUILD)/%: $(BUILD)/test-%.o
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@

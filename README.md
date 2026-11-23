@@ -38,7 +38,8 @@ ctest --test-dir build/windows --output-on-failure
 | `Ctrl+Maj+P` | Ouvrir la palette des commandes |
 | `Ctrl+Maj+F` | Chercher du texte dans le projet |
 | `Ctrl+S` | Enregistrer le fichier |
-| `Ctrl+Espace` | Compléter un mot à partir du document |
+| `Ctrl+Espace` | Afficher les suggestions à la position du curseur |
+| `Tab` | Accepter la suggestion sélectionnée, ou indenter si la liste est fermée |
 | `F12` | Aller à la définition via `clangd` ou `rust-analyzer`, si installé |
 | `F5` | Compiler puis exécuter le fichier C++ ou Rust courant |
 | `Ctrl+Entrée` | Lancer une tâche du projet, par exemple `make` ou `cargo run` |
@@ -46,6 +47,8 @@ ctest --test-dir build/windows --output-on-failure
 | `Ctrl+,` | Ouvrir les préférences |
 
 L’éditeur propose des onglets, une coloration syntaxique, une deuxième vue synchronisée sur le fichier actif, et la recherche par fichier. Il ouvre les textes UTF‑8 jusqu’à 16 Mio, préserve les fins de ligne et vérifie les modifications sur disque avant d’écraser un fichier. Pour un projet à plusieurs fichiers, lancez la commande de build du projet via **Run workspace task…**. **Build and run current file** cible les programmes autonomes et requiert un compilateur C++ ou `rustc`.
+
+La coloration, l’indentation et les suggestions s’adaptent au langage détecté à l’ouverture. Dans **Explorer**, faites un clic droit pour créer, ouvrir, renommer ou supprimer un fichier, ou pour l’ouvrir avec **Live Server**. Le bouton **Go Live** dans la barre d’état ouvre la prévisualisation d’une page HTML. Voir le [guide de l’éditeur](docs/editor.md) pour le détail.
 
 Le panneau **Source control** sépare les changements locaux et indexés. Utilisez **Stage** ou **Unstage** sur le fichier sélectionné. **Commit…** affiche les fichiers indexés et demande le message avant de créer le commit local. Le menu de connexions ouvre des sessions dans le terminal intégré.
 
