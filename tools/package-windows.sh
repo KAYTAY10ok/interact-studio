@@ -24,6 +24,7 @@ payload="$stage/$basename"
 mkdir -p "$payload"/{platforms,docs,licenses}
 install -m 755 "$build/InteractStudio.exe" "$payload/"
 install -m 755 "$platform" "$payload/platforms/"
+printf '[Paths]\nPlugins=.\n' > "$payload/qt.conf"
 install -m 644 "$repo"/{README.md,LICENSE} "$payload/"
 install -m 644 "$repo"/docs/{installation.md,customization.md,design.md,interact-studio.png} "$payload/docs/"
 install -m 644 "$repo/docs/releases/$tag.md" "$payload/docs/RELEASE.md"
@@ -61,8 +62,9 @@ with the corresponding release tag at https://github.com/KAYTAY10ok/interact-stu
 Runtime libraries are distributed as separate DLLs. Exact MSYS2 UCRT64 package
 names and versions are listed in MSYS2-packages.txt. Package metadata and
 source build recipes are available at https://packages.msys2.org/ and
-https://github.com/msys2/MINGW-packages. The Qt 5 base module's sources
-are also available at https://download.qt.io/archive/qt/5.15/.
+https://github.com/msys2/MINGW-packages. The Qt 5 base recipe identifies the
+exact KDE qtbase revision and all downstream patches:
+https://github.com/msys2/MINGW-packages/tree/master/mingw-w64-qt5-base
 NOTICES
 
 # Check the portable layout with no Qt development binaries or plugins on PATH.
