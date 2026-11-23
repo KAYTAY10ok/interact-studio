@@ -1,8 +1,12 @@
 # Interact Studio
 
-IDE natif pour Linux, écrit en C++17 avec Qt Widgets. Son interface reprend la densité des éditeurs de bureau, avec des panneaux déplaçables, des commandes au clavier et des réglages que chaque utilisateur peut modifier.
+IDE natif pour Windows et Linux, écrit en C++17 avec Qt Widgets. Son interface reprend la densité des éditeurs de bureau, avec des panneaux déplaçables, des commandes au clavier et des réglages que chaque utilisateur peut modifier.
 
 ![Interact Studio avec son explorateur, son éditeur C++ et son terminal](docs/interact-studio.png)
+
+## Télécharger
+
+Les [releases GitHub](https://github.com/KAYTAY10ok/interact-studio/releases) proposent un installateur et un ZIP portable pour Windows x64, ainsi qu’un paquet et une archive pour Debian 12 amd64. Le [guide d’installation](docs/installation.md) explique les prérequis et la vérification du téléchargement.
 
 ## Compiler et lancer
 
@@ -15,6 +19,16 @@ make -j2
 ```
 
 Sur une distribution qui fournit Qt 5 et QTermWidget 5, installez le compilateur C++17, Make, pkg-config, les paquets de développement Qt 5 et QTermWidget 5, Git et ripgrep, puis utilisez les deux dernières commandes. Par exemple, sous Debian 12, les paquets sont `build-essential pkg-config qtbase5-dev libqtermwidget5-1-dev git ripgrep`.
+
+Sous Windows, ouvrez le terminal **MSYS2 UCRT64** puis compilez avec Qt 5 et CMake.
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,qt5-base}
+cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/windows --parallel 2
+ctest --test-dir build/windows --output-on-failure
+./build/windows/InteractStudio.exe
+```
 
 ## Travailler dans un projet
 
@@ -53,4 +67,6 @@ make bench
 
 Les tests Qt s’exécutent hors écran. Le benchmark mesure le traitement de 500 frappes simulées dans un fichier C++ de 5 000 lignes. Le temps d’affichage dépend de la machine et de son environnement graphique.
 
-La cible testée est Linux. Les extensions de commande JSON utilisent le terminal local. Les connexions SSH, Docker et WSL donnent accès à des shells. L’explorateur et les éditeurs travaillent avec les fichiers visibles depuis le système qui exécute Studio.
+Linux intègre les sessions interactives dans un pseudo-terminal. Sous Windows, les shells interactifs s’ouvrent dans une console séparée et les tâches affichent leurs sorties dans Studio. Les extensions de commande JSON utilisent le terminal local. Les connexions SSH, Docker et WSL donnent accès à des shells. L’explorateur et les éditeurs travaillent avec les fichiers visibles depuis le système qui exécute Studio.
+
+Interact Studio est distribué sous licence [GPL-3.0 ou ultérieure](LICENSE).

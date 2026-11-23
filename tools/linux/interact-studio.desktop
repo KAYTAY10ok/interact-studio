@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Interact Studio
+Comment=Edit, build and run code in a native workspace
+Comment[fr]=Écrire, compiler et exécuter du code dans un espace de travail natif
+Exec=interact-studio %F
+Icon=applications-development
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupNotify=true

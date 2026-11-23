@@ -3,7 +3,8 @@ CPPFLAGS += -Isrc
 CXXFLAGS ?= -O2 -g0
 CXXFLAGS += -std=c++17 -fPIC -Wall -Wextra -Wpedantic -MMD -MP
 BUILD := build
-OBJECTS := $(patsubst src/%.cpp,$(BUILD)/%.o,$(wildcard src/*.cpp))
+SOURCES := $(filter-out src/terminal_win.cpp,$(wildcard src/*.cpp))
+OBJECTS := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SOURCES))
 MODULES := $(filter-out $(BUILD)/main.o,$(OBJECTS))
 
 # Use the system Qt and QTermWidget by default.

@@ -14,8 +14,12 @@
 #include <QTextCursor>
 #include <QVBoxLayout>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#else
 #include <csignal>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -23,20 +27,66 @@ namespace {
 // cancelling it also stops those children.
 class CompilerProcess final : public QProcess {
 public:
-    explicit CompilerProcess(QObject *parent) : QProcess(parent) {}
+    explicit CompilerProcess(QObject *parent) : QProcess(parent)
+    {
+#ifdef Q_OS_WIN
+        job = CreateJobObjectW(nullptr, nullptr);
+        if (!job) return;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION options{};
+        options.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &options, sizeof(options))) {
+            CloseHandle(job);
+            job = nullptr;
+            return;
+        }
+        // Start suspended so the compiler cannot spawn children before assignment.
+        setCreateProcessArgumentsModifier([this](CreateProcessArguments *args) {
+            args->flags |= CREATE_SUSPENDED;
+            processInfo = args->processInformation;
+        });
+        connect(this, &QProcess::started, this, [this] {
+            auto *info = processInfo;
+            processInfo = nullptr;
+            if (!info) return;
+            inJob = AssignProcessToJobObject(job, info->hProcess);
+            // Job assignment can be restricted by the caller's job policy.
+            // In that case the compiler still runs and QProcess cancels the parent.
+            if (ResumeThread(info->hThread) == DWORD(-1)) kill();
+        });
+#endif
+    }
+
+    ~CompilerProcess() override
+    {
+#ifdef Q_OS_WIN
+        if (job) CloseHandle(job);
+#endif
+    }
+
     void cancel()
     {
         if (state() == NotRunning) return;
+#ifdef Q_OS_WIN
+        if (inJob) TerminateJobObject(job, 1);
+#else
         const auto pid = processId();
         if (pid > 0) ::kill(-static_cast<pid_t>(pid), SIGKILL);
+#endif
         kill();
     }
 
+#ifdef Q_OS_WIN
+private:
+    HANDLE job = nullptr;
+    PROCESS_INFORMATION *processInfo = nullptr;
+    bool inJob = false;
+#else
 protected:
     void setupChildProcess() override
     {
         if (::setsid() == -1) ::_exit(125);
     }
+#endif
 };
 
 struct Artifact final : QObject {
@@ -102,7 +152,11 @@ public:
             return;
         }
 
+#ifdef Q_OS_WIN
+        const QString binary = artifact->dir.filePath("program.exe");
+#else
         const QString binary = artifact->dir.filePath("program");
+#endif
         args << source.absoluteFilePath() << "-o" << binary;
         status->setText(tr("Compiling %1 with %2").arg(source.fileName(), QFileInfo(compiler).fileName()));
         connect(process, &QProcess::readyRead, this, &BuildDialog::readOutput);

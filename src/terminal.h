@@ -19,6 +19,9 @@ public:
 
 private:
     void openSession(const QString &title, const QString &program, const QStringList &args);
+#ifdef Q_OS_WIN
+    void openCommand(const QString &title, const QString &program, const QStringList &args);
+#endif
     void showMessage(const QString &title, const QString &message);
     void addPage(QWidget *page, const QString &title);
 
