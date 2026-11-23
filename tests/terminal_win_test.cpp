@@ -76,6 +76,17 @@ int main(int argc, char **argv)
     if (!waitFor([&] { return output->toPlainText().contains("Process exited with code 0"); }))
         return fail("the command did not receive input or report success");
 
+    {
+        Terminal closing;
+        closing.setWorkspace(workspace);
+        closing.launchCommand(executable, probeArguments);
+        auto *runningOutput = closing.findChild<QPlainTextEdit *>("taskOutput");
+        if (!runningOutput ||
+                !waitFor([&] { return runningOutput->toPlainText().contains("literal arguments verified"); }))
+            return fail("unable to start the task used to test closing a busy terminal");
+        // Destroy the console while the child is still waiting for stdin.
+    }
+
     const auto shell = temp.filePath("pwsh.exe");
     if (!QFile::copy(app.applicationFilePath(), shell)) return fail("unable to copy console probe");
     const auto marker = temp.filePath("console.txt");

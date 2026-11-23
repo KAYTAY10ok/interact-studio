@@ -26,6 +26,22 @@
 
 namespace {
 
+class CommandPage final : public QWidget {
+public:
+    QProcess process;
+
+    ~CommandPage() override
+    {
+        // QProcess may deliver ready-read and finished signals while its
+        // destructor stops a running task. Do not call back into a closing tab.
+        process.disconnect();
+        if (process.state() != QProcess::NotRunning) {
+            process.kill();
+            process.waitForFinished(1000);
+        }
+    }
+};
+
 QString findNativeExecutable(const QString &program)
 {
     // Launch executables directly. Batch scripts require an explicit shell.
@@ -147,7 +163,7 @@ void Terminal::openCommand(const QString &title, const QString &program, const Q
         return;
     }
 
-    auto *page = new QWidget;
+    auto *page = new CommandPage;
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(4, 4, 4, 4);
     auto *output = new QPlainTextEdit(page);
@@ -161,7 +177,7 @@ void Terminal::openCommand(const QString &title, const QString &program, const Q
     input->setPlaceholderText(tr("Send a line to the program"));
     layout->addWidget(input);
 
-    auto *process = new QProcess(page);
+    auto *process = &page->process;
     process->setProgram(executable);
     process->setArguments(args);
     process->setWorkingDirectory(workspace);
