@@ -16,6 +16,9 @@ public:
     void launchWsl();
     void launchSsh();
     void launchCommand(QString program, QStringList args);
+    void launchInteractiveCommand(QString program, QStringList args) {
+        openSession(program, program, args);
+    }
 
 private:
     void openSession(const QString &title, const QString &program, const QStringList &args);

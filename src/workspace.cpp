@@ -1,5 +1,6 @@
 #include "workspace.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
@@ -10,6 +11,7 @@
 #include <QFileIconProvider>
 #include <QFileSystemModel>
 #include <QFontDatabase>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QJsonDocument>
@@ -17,6 +19,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMap>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
@@ -24,13 +27,13 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
-#ifdef Q_OS_WIN
 #include <QRegularExpression>
-#endif
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QToolButton>
 #include <QTreeView>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <memory>
 
@@ -118,6 +121,50 @@ bool validEntryName(const QString &name) {
 #endif
     return true;
 }
+
+QMap<QString, QString> readIdentity(const QByteArray &output) {
+    QMap<QString, QString> values;
+    for (const auto &record : output.split('\0')) {
+        const int newline = record.indexOf('\n');
+        if (newline > 0)
+            values.insert(QString::fromLatin1(record.left(newline)), QString::fromUtf8(record.mid(newline + 1)));
+    }
+    return values;
+}
+
+QStringList readGitLines(const QByteArray &output) {
+    QStringList lines;
+    for (const auto &line : output.split('\n')) {
+        const auto value = QString::fromUtf8(line).trimmed();
+        if (!value.isEmpty()) lines.append(value);
+    }
+    return lines;
+}
+
+QString githubWebUrl(QString remote) {
+    const QString shorthand = "git@github.com:";
+    if (remote.startsWith(shorthand, Qt::CaseInsensitive))
+        remote = "ssh://git@github.com/" + remote.mid(shorthand.size());
+    const QUrl url(remote, QUrl::StrictMode);
+    if (!url.isValid() || url.host() != "github.com" ||
+        (url.scheme() != "https" && url.scheme() != "http" && url.scheme() != "ssh")) return {};
+    auto path = url.path(QUrl::FullyDecoded);
+    if (path.endsWith(".git")) path.chop(4);
+    static const QRegularExpression slug(QStringLiteral("^/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+)$"));
+    const auto match = slug.match(path);
+    if (!match.hasMatch() || match.captured(2) == "." || match.captured(2) == "..") return {};
+    return "https://github.com" + path;
+}
+
+QString safeGitError(const QByteArray &errors) {
+    QString message = QString::fromLocal8Bit(errors).trimmed();
+    // Git and credential helpers sometimes repeat a URL from the repository config.
+    static const QRegularExpression userInfo(QStringLiteral("([a-zA-Z][a-zA-Z0-9+.-]*://)[^\\s/@]+@"));
+    static const QRegularExpression urlQuery(QStringLiteral("([a-zA-Z][a-zA-Z0-9+.-]*://[^\\s'\"]+)\\?[^\\s'\"]+"));
+    message.replace(userInfo, QStringLiteral("\\1"));
+    message.replace(urlQuery, QStringLiteral("\\1"));
+    return message.left(350);
+}
 }
 
 Workspace::Workspace(QWidget *parent) : QWidget(parent) {
@@ -190,6 +237,43 @@ Workspace::Workspace(QWidget *parent) : QWidget(parent) {
     refresh_ = new QPushButton(tr("Refresh"));
     bar->addWidget(refresh_);
     git->addLayout(bar);
+    auto *branchBar = new QHBoxLayout;
+    gitBranch_ = new QLabel;
+    gitBranch_->setObjectName("gitBranchSummary");
+    gitBranch_->setTextFormat(Qt::PlainText);
+    gitBranch_->setWordWrap(true);
+    branchBar->addWidget(gitBranch_, 1);
+    auto *more = new QToolButton;
+    more->setText(tr("Git"));
+    more->setAccessibleName(tr("Git actions"));
+    more->setPopupMode(QToolButton::InstantPopup);
+    auto *gitMenu = new QMenu(more);
+    gitIdentity_ = gitMenu->addAction(tr("Repository identity…"), this, [this] { editIdentity(); });
+    gitIdentity_->setObjectName("gitIdentity");
+    gitSwitch_ = gitMenu->addAction(tr("Switch branch…"), this, [this] { switchBranch(false); });
+    gitSwitch_->setObjectName("gitSwitch");
+    gitCreate_ = gitMenu->addAction(tr("Create branch…"), this, [this] { switchBranch(true); });
+    gitCreate_->setObjectName("gitCreate");
+    gitMenu->addSeparator();
+    gitFetch_ = gitMenu->addAction(tr("Fetch…"), this, [this] { synchronize(SyncOperation::Fetch); });
+    gitFetch_->setObjectName("gitFetch");
+    gitPull_ = gitMenu->addAction(tr("Pull (fast-forward only)…"), this, [this] { synchronize(SyncOperation::Pull); });
+    gitPull_->setObjectName("gitPull");
+    gitPush_ = gitMenu->addAction(tr("Push branch…"), this, [this] { synchronize(SyncOperation::Push); });
+    gitPush_->setObjectName("gitPush");
+    gitMenu->addSeparator();
+    gitHubRepo_ = gitMenu->addAction(tr("Open GitHub repository"), this, [this] { browseGitHub(); });
+    gitHubRepo_->setObjectName("gitBrowse");
+    gitHubStatus_ = gitMenu->addAction(tr("GitHub sign-in status"), this, [this] {
+        if (onGitCommand) onGitCommand("gh", {"auth", "status", "--hostname", "github.com"});
+    });
+    gitHubLogin_ = gitMenu->addAction(tr("Sign in to GitHub…"), this, [this] {
+        if (onGitCommand) onGitCommand("gh", {"auth", "login", "--hostname", "github.com", "--web",
+                                               "--git-protocol", "https"});
+    });
+    more->setMenu(gitMenu);
+    branchBar->addWidget(more);
+    git->addLayout(branchBar);
     auto *indexActions = new QHBoxLayout;
     stage_ = new QPushButton(tr("Stage"));
     stage_->setObjectName("gitStage");
@@ -259,8 +343,18 @@ Workspace::~Workspace() {
 void Workspace::cancel(QProcess *&process) {
     if (!process) return;
     process->disconnect(this);
-    if (process->state() != QProcess::NotRunning) process->kill();
-    process->deleteLater();
+    if (process->state() == QProcess::NotRunning) {
+        process->deleteLater();
+    } else {
+        // Let Qt reap a canceled reader after the widget stops using its output.
+        process->setParent(QCoreApplication::instance());
+        connect(process, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),
+                process, &QObject::deleteLater);
+        connect(process, &QProcess::errorOccurred, process, [dying = process](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) dying->deleteLater();
+        });
+        process->kill();
+    }
     process = nullptr;
 }
 
@@ -275,6 +369,7 @@ void Workspace::setRoot(QString directory) {
     changes_->clear();
     diff_->clear();
     gitRoot_.clear();
+    readBranchSummary({});
     gitReady_ = false;
     gitFeedback_->hide();
     updateGitActions();
@@ -486,7 +581,8 @@ void Workspace::search() {
 }
 
 void Workspace::runGit(QProcess *&slot, const QString &cwd, QStringList arguments, int byteLimit,
-                       std::function<void(QByteArray, QString, bool)> done, bool stopOnLimit) {
+                       std::function<void(QByteArray, QString, bool)> done, bool stopOnLimit,
+                       QSet<int> acceptedCodes) {
     cancel(slot);
     auto *p = new QProcess(this);
     slot = p;
@@ -507,17 +603,20 @@ void Workspace::runGit(QProcess *&slot, const QString &cwd, QStringList argument
     auto env = QProcessEnvironment::systemEnvironment();
     env.insert("GIT_OPTIONAL_LOCKS", "0");
     env.insert("GIT_TERMINAL_PROMPT", "0");
+    env.insert("LC_ALL", "C");
     p->setProcessEnvironment(env);
     connect(p, &QProcess::readyReadStandardOutput, this, drain);
     connect(p, &QProcess::readyReadStandardError, this, drainErrors);
     connect(p, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [p, active, drain, drainErrors, output, errors, byteLimit, stopOnLimit, done](int code, QProcess::ExitStatus status) {
+            [p, active, drain, drainErrors, output, errors, byteLimit, stopOnLimit, acceptedCodes, done]
+            (int code, QProcess::ExitStatus status) {
         drain();
         drainErrors();
         const bool truncated = output->size() > byteLimit;
         QString error;
-        if ((!truncated || !stopOnLimit) && (status != QProcess::NormalExit || code != 0)) {
-            error = QString::fromLocal8Bit(*errors).trimmed().left(350);
+        if ((!truncated || !stopOnLimit) &&
+            (status != QProcess::NormalExit || !acceptedCodes.contains(code) || (code != 0 && !errors->isEmpty()))) {
+            error = safeGitError(*errors);
             if (error.isEmpty()) error = tr("Git exited with status %1").arg(code);
         }
         *active = nullptr;
@@ -544,6 +643,7 @@ void Workspace::refreshGit() {
     changes_->clear();
     diff_->clear();
     gitRoot_.clear();
+    readBranchSummary({});
     if (directory_.isEmpty()) return;
     gitState_->setText(tr("Reading changes…"));
     runGit(statusProcess_, directory_, {"rev-parse", "--show-toplevel"}, 65536,
@@ -561,7 +661,8 @@ void Workspace::refreshGit() {
 void Workspace::readStatus() {
     const auto pathspec = QDir(gitRoot_).relativeFilePath(directory_);
     runGit(statusProcess_, gitRoot_,
-           {"status", "--porcelain=v1", "--no-renames", "--untracked-files=all", "-z", "--", pathspec},
+           {"status", "--porcelain=v1", "--branch", "--ahead-behind", "--no-renames",
+            "--untracked-files=all", "-z", "--", pathspec},
            256 * 1024, [this](QByteArray output, QString error, bool truncated) {
         if (!error.isEmpty()) { gitState_->setText(error); return; }
         int offset = 0;
@@ -571,6 +672,10 @@ void Workspace::readStatus() {
             if (end < 0) break;
             const QByteArray record = output.mid(offset, end - offset);
             offset = end + 1;
+            if (record.startsWith("## ")) {
+                readBranchSummary(record.mid(3));
+                continue;
+            }
             if (record.size() <= 3) continue;
             if (changes_->count() == 1000) { limited = true; break; }
             const QString state = QString::fromLatin1(record.left(2));
@@ -591,6 +696,48 @@ void Workspace::readStatus() {
     });
 }
 
+void Workspace::readBranchSummary(const QByteArray &line) {
+    branch_.clear();
+    upstream_.clear();
+    branchHasCommit_ = false;
+    QString summary;
+    if (line == "HEAD (no branch)") {
+        summary = tr("Detached HEAD");
+        branchHasCommit_ = true;
+    } else if (!line.isEmpty()) {
+        const QByteArray unborn("No commits yet on ");
+        const QByteArray firstCommit("Initial commit on ");
+        if (line.startsWith(unborn) || line.startsWith(firstCommit)) {
+            branch_ = QString::fromUtf8(line.mid(line.startsWith(unborn) ? unborn.size() : firstCommit.size()));
+            summary = tr("%1 · no commits").arg(branch_);
+        } else {
+            const int tracking = line.indexOf("...");
+            branch_ = QString::fromUtf8(tracking < 0 ? line : line.left(tracking));
+            branchHasCommit_ = true;
+            summary = branch_;
+            if (tracking >= 0) {
+                const QByteArray trailing = line.mid(tracking + 3);
+                const auto stats = trailing.indexOf(" [");
+                upstream_ = QString::fromUtf8(stats < 0 ? trailing : trailing.left(stats));
+                summary += tr(" → %1").arg(upstream_);
+                if (stats >= 0) {
+                    const QString counts = QString::fromLatin1(trailing.mid(stats + 2));
+                    static const QRegularExpression ahead(QStringLiteral("ahead (\\d+)"));
+                    static const QRegularExpression behind(QStringLiteral("behind (\\d+)"));
+                    const auto a = ahead.match(counts);
+                    const auto b = behind.match(counts);
+                    if (a.hasMatch()) summary += tr(" ↑%1").arg(a.captured(1));
+                    if (b.hasMatch()) summary += tr(" ↓%1").arg(b.captured(1));
+                    if (counts == "gone]") summary += tr(" (gone)");
+                }
+            } else {
+                summary += tr(" · no upstream");
+            }
+        }
+    }
+    gitBranch_->setText(summary);
+}
+
 void Workspace::updateGitActions() {
     const auto *item = changes_->currentItem();
     const QString state = item ? item->data(StatusRole).toString() : QString();
@@ -598,6 +745,15 @@ void Workspace::updateGitActions() {
     const bool conflict = conflicts.contains(state);
     const bool editable = gitReady_ && !gitBusy_;
     const bool editablePath = editable && item && item->data(LiteralPathRole).isValid();
+    gitIdentity_->setEnabled(editable);
+    gitSwitch_->setEnabled(editable);
+    gitCreate_->setEnabled(editable);
+    gitFetch_->setEnabled(editable);
+    gitPull_->setEnabled(editable && branchHasCommit_ && !branch_.isEmpty() && !upstream_.isEmpty());
+    gitPush_->setEnabled(editable && branchHasCommit_ && !branch_.isEmpty());
+    gitHubRepo_->setEnabled(editable && bool(onGitHub));
+    gitHubStatus_->setEnabled(editable && bool(onGitCommand));
+    gitHubLogin_->setEnabled(editable && bool(onGitCommand));
     refresh_->setEnabled(!gitBusy_);
     commit_->setEnabled(editable);
     stage_->setEnabled(editablePath && state.size() == 2 &&
@@ -613,21 +769,307 @@ void Workspace::changeIndex(bool stage) {
     else modifyRepository({"reset", "--quiet", "--", path}, tr("File unstaged"));
 }
 
-void Workspace::modifyRepository(QStringList arguments, const QString &successMessage) {
+void Workspace::modifyRepository(QStringList arguments, const QString &successMessage, bool changesFiles) {
     gitBusy_ = true;
     updateGitActions();
     gitFeedback_->setText(tr("Running Git…"));
     gitFeedback_->show();
     const QString workspace = directory_;
     runGit(mutationProcess_, gitRoot_, std::move(arguments), 8192,
-           [this, workspace, successMessage](QByteArray, QString error, bool) {
+           [this, workspace, successMessage, changesFiles](QByteArray, QString error, bool) {
         gitBusy_ = false;
         if (directory_ == workspace) {
-            gitFeedback_->setText(error.isEmpty() ? successMessage : error);
-            gitFeedback_->show();
+            setGitFeedback(error.isEmpty() ? successMessage : error);
+            if (error.isEmpty() && changesFiles && onCheckout) onCheckout();
         }
         refreshGit();
     }, false);
+}
+
+void Workspace::setGitFeedback(const QString &message) {
+    gitFeedback_->setText(message);
+    gitFeedback_->setVisible(!message.isEmpty());
+}
+
+void Workspace::finishGitAction(const QString &feedback, bool refresh) {
+    gitBusy_ = false;
+    setGitFeedback(feedback);
+    if (refresh || !gitReady_) refreshGit();
+    else updateGitActions();
+}
+
+void Workspace::editIdentity() {
+    if (!gitIdentity_->isEnabled()) return;
+    gitBusy_ = true;
+    updateGitActions();
+    const auto directory = directory_;
+    const QStringList query{"--null", "--get-regexp", "^user\\.(name|email)$"};
+    const auto available = [this, directory](bool truncated, const QString &error) {
+        if (directory != directory_ || !gitReady_) { finishGitAction(); return false; }
+        if (!error.isEmpty() || truncated) {
+            finishGitAction(error.isEmpty() ? tr("Git identity settings exceed the display limit.") : error);
+            return false;
+        }
+        return true;
+    };
+    runGit(mutationProcess_, gitRoot_, QStringList{"config"} + query, 32 * 1024,
+           [this, directory, available, query](QByteArray output, QString error, bool truncated) {
+        if (!available(truncated, error)) return;
+        const auto effective = readIdentity(output);
+        runGit(mutationProcess_, gitRoot_,
+               QStringList{"config", "--local", "--no-includes"} + query, 32 * 1024,
+               [this, directory, available, effective](QByteArray bytes, QString localError, bool limited) {
+            if (!available(limited, localError)) return;
+            const auto local = readIdentity(bytes);
+            QDialog dialog(this);
+            dialog.setObjectName("gitIdentityDialog");
+            dialog.setWindowTitle(tr("Repository identity"));
+            auto *layout = new QFormLayout(&dialog);
+            auto *description = new QLabel(tr("Only this repository is changed. Clear a field to remove its local override."));
+            description->setWordWrap(true);
+            layout->addRow(description);
+            auto *name = new QLineEdit(local.value("user.name"));
+            auto *email = new QLineEdit(local.value("user.email"));
+            name->setObjectName("gitIdentityName");
+            email->setObjectName("gitIdentityEmail");
+            name->setMaxLength(256);
+            email->setMaxLength(256);
+            layout->addRow(tr("Local name"), name);
+            layout->addRow(tr("Local email"), email);
+            auto addEffective = [&](const QString &label, const QString &key) {
+                auto *value = new QLabel(effective.value(key, tr("Not set")));
+                value->setTextFormat(Qt::PlainText);
+                value->setWordWrap(true);
+                value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                layout->addRow(label, value);
+            };
+            addEffective(tr("Current effective name"), "user.name");
+            addEffective(tr("Current effective email"), "user.email");
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+            layout->addRow(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            dialog.resize(460, dialog.sizeHint().height());
+            if (dialog.exec() != QDialog::Accepted || directory_ != directory) {
+                finishGitAction();
+                return;
+            }
+            QList<QStringList> commands;
+            auto collect = [&](const QString &key, const QString &value) {
+                const auto entered = value.trimmed();
+                if (entered.isEmpty()) {
+                    if (local.contains(key)) commands.append({"config", "--local", "--unset-all", key});
+                } else if (entered != local.value(key)) {
+                    commands.append({"config", "--local", "--replace-all", key, entered});
+                }
+            };
+            collect("user.name", name->text());
+            collect("user.email", email->text());
+            if (commands.isEmpty()) finishGitAction();
+            else writeIdentity(commands);
+        }, true, {0, 1});
+    }, true, {0, 1});
+}
+
+void Workspace::writeIdentity(const QList<QStringList> &commands, int index) {
+    const auto directory = directory_;
+    const auto arguments = commands.at(index);
+    runGit(mutationProcess_, gitRoot_, arguments, 4096,
+           [this, directory, commands, index](QByteArray, QString error, bool) {
+        if (directory_ != directory) { finishGitAction(); return; }
+        if (!error.isEmpty()) {
+            const auto message = index > 0 ? tr("Identity partly updated. %1").arg(error) : error;
+            finishGitAction(message);
+        } else if (index + 1 < commands.size()) {
+            writeIdentity(commands, index + 1);
+        } else {
+            finishGitAction(tr("Repository identity updated"));
+        }
+    }, false, arguments.contains("--unset-all") ? QSet<int>{0, 5} : QSet<int>{0});
+}
+
+void Workspace::switchBranch(bool create) {
+    if (!(create ? gitCreate_ : gitSwitch_)->isEnabled()) return;
+    gitBusy_ = true;
+    updateGitActions();
+    const auto directory = directory_;
+    auto change = [this, create, directory](const QString &branch) {
+        if (branch.isEmpty() || directory != directory_ || !gitReady_ ||
+            (!create && branch == branch_) || (beforeCheckout && !beforeCheckout())) {
+            finishGitAction();
+            return;
+        }
+        QStringList arguments{"switch", "--no-guess", "--no-merge", "--no-overwrite-ignore", "--no-recurse-submodules"};
+        if (create) arguments << "-c";
+        else arguments << "--";
+        arguments << branch;
+        modifyRepository(arguments, tr("Switched to %1").arg(branch), true);
+    };
+    if (create) {
+        bool ok = false;
+        const auto branch = QInputDialog::getText(this, tr("Create branch"), tr("New branch name"),
+                                                   QLineEdit::Normal, {}, &ok).trimmed();
+        if (ok && (branch.startsWith('-') || branch.contains("@{"))) {
+            finishGitAction(tr("Enter a branch name, not a Git option or revision shorthand."));
+        } else {
+            change(ok ? branch : QString());
+        }
+        return;
+    }
+    runGit(mutationProcess_, gitRoot_, {"for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"}, 64 * 1024,
+           [this, directory, change](QByteArray output, QString error, bool truncated) {
+        if (directory != directory_) { finishGitAction(); return; }
+        if (truncated || !error.isEmpty()) {
+            finishGitAction(error.isEmpty() ? tr("Too many local branches. Use the terminal to select one.") : error);
+            return;
+        }
+        const auto branches = readGitLines(output);
+        if (branches.isEmpty()) { finishGitAction(tr("This repository has no local branches yet.")); return; }
+        bool ok = false;
+        const auto branch = QInputDialog::getItem(this, tr("Switch branch"), tr("Local branch"), branches,
+                                                 qMax(0, branches.indexOf(branch_)), false, &ok);
+        change(ok ? branch : QString());
+    });
+}
+
+void Workspace::selectRemote(const QString &preferred, std::function<void(QString)> ready) {
+    if (!preferred.isEmpty() && preferred != ".") {
+        ready(preferred);
+        return;
+    }
+    const auto directory = directory_;
+    runGit(mutationProcess_, gitRoot_, {"remote"}, 32 * 1024,
+           [this, directory, ready](QByteArray output, QString error, bool truncated) {
+        if (directory_ != directory) { finishGitAction(); return; }
+        if (!error.isEmpty() || truncated) {
+            finishGitAction(error.isEmpty() ? tr("Too many remotes. Use the terminal to select one.") : error);
+            return;
+        }
+        const auto remotes = readGitLines(output);
+        if (remotes.isEmpty()) { finishGitAction(tr("No Git remote is configured.")); return; }
+        if (remotes.size() == 1) { ready(remotes.first()); return; }
+        bool ok = false;
+        const auto remote = QInputDialog::getItem(this, tr("Select remote"), tr("Remote"), remotes,
+                                                  qMax(0, remotes.indexOf("origin")), false, &ok);
+        if (!ok || directory != directory_) { finishGitAction(); return; }
+        ready(remote);
+    });
+}
+
+void Workspace::fastForward(const QString &expectedBranch, const QString &ref) {
+    const auto directory = directory_;
+    runGit(mutationProcess_, gitRoot_, {"symbolic-ref", "--short", "HEAD"}, 8192,
+           [this, directory, expectedBranch, ref](QByteArray output, QString error, bool truncated) {
+        if (directory_ != directory) { finishGitAction(); return; }
+        if (truncated || !error.isEmpty() || QString::fromUtf8(output).trimmed() != expectedBranch) {
+            finishGitAction(tr("The checked-out branch changed. Pull again after refreshing."), true);
+            return;
+        }
+        if (beforeCheckout && !beforeCheckout()) { finishGitAction({}, true); return; }
+        // This fast-forward uses the fetched upstream ref and protects ignored
+        // files as well as working changes. Git pull does not expose that option.
+        modifyRepository({"merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--", ref},
+                         tr("Pull completed"), true);
+    });
+}
+
+void Workspace::synchronize(SyncOperation operation) {
+    QAction *action = operation == SyncOperation::Fetch ? gitFetch_ :
+                      operation == SyncOperation::Pull ? gitPull_ : gitPush_;
+    if (!action->isEnabled()) return;
+    gitBusy_ = true;
+    updateGitActions();
+    const auto directory = directory_;
+    const auto branch = branch_;
+    // Arguments do not use shell interpolation. The fully qualified ref
+    // prevents tag ambiguity and push configuration from selecting extra refs.
+    const QString fullRef = "refs/heads/" + branch;
+    runGit(mutationProcess_, gitRoot_, {"for-each-ref",
+           "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)",
+           "--", fullRef}, 16 * 1024,
+           [this, operation, directory, branch, fullRef](QByteArray output, QString error, bool truncated) {
+        if (directory_ != directory || !gitReady_) { finishGitAction(); return; }
+        if (!error.isEmpty() || truncated) {
+            finishGitAction(error.isEmpty() ? tr("Could not read branch tracking settings.") : error);
+            return;
+        }
+        const auto tracking = output.trimmed().split('\0');
+        const bool localBranch = tracking.size() == 4 && QString::fromUtf8(tracking.first()) == fullRef;
+        const auto preferred = localBranch ? QString::fromUtf8(tracking.at(1)) : QString();
+        const auto remoteRef = localBranch ? QString::fromUtf8(tracking.at(2)) : QString();
+        const auto upstreamRef = localBranch ? QString::fromUtf8(tracking.at(3)) : QString();
+        QStringList fetch{"fetch", "--no-tags", "--no-prune", "--no-prune-tags", "--no-recurse-submodules", "--"};
+        if (operation == SyncOperation::Fetch) {
+            selectRemote(preferred, [this, fetch](const QString &remote) {
+                modifyRepository(fetch + QStringList{remote}, tr("Fetch completed"));
+            });
+            return;
+        }
+        if (!localBranch) { finishGitAction(tr("Refresh to select an existing branch."), true); return; }
+        if (operation == SyncOperation::Pull) {
+            if (preferred.isEmpty() || !upstreamRef.startsWith("refs/")) {
+                finishGitAction(tr("This branch has no configured upstream."));
+                return;
+            }
+            if (preferred == ".") { fastForward(branch, upstreamRef); return; }
+            setGitFeedback(tr("Fetching %1…").arg(preferred));
+            runGit(mutationProcess_, gitRoot_, fetch + QStringList{preferred}, 8192,
+                   [this, directory, branch, upstreamRef](QByteArray, QString error, bool) {
+                if (directory_ != directory) { finishGitAction(); return; }
+                if (!error.isEmpty()) finishGitAction(error, true);
+                else fastForward(branch, upstreamRef);
+            }, false);
+            return;
+        }
+        // Support normal branch targets only. An upstream in this same repository
+        // is not rewritten by an action named Push branch.
+        if (preferred == "." || (!remoteRef.isEmpty() && !remoteRef.startsWith("refs/heads/"))) {
+            finishGitAction(tr("This upstream is not a branch on a configured remote. Use the terminal."));
+            return;
+        }
+        selectRemote(preferred, [this, directory, branch, fullRef, remoteRef](const QString &remote) {
+            if (remote.contains('=')) {
+                finishGitAction(tr("Use the terminal to push to this unusually named remote."));
+                return;
+            }
+            const auto target = remoteRef.isEmpty() ? fullRef : remoteRef;
+            QMessageBox confirm(QMessageBox::Question, tr("Push branch"),
+                tr("Push %1 to %2/%3?").arg(branch, remote, target.mid(11)),
+                QMessageBox::Yes | QMessageBox::Cancel, this);
+            confirm.setTextFormat(Qt::PlainText);
+            confirm.setDefaultButton(QMessageBox::Cancel);
+            if (confirm.exec() != QMessageBox::Yes || directory != directory_) {
+                finishGitAction();
+                return;
+            }
+            QStringList args{"-c", "remote." + remote + ".mirror=false", "push",
+                             "--no-mirror", "--no-force", "--no-force-with-lease", "--no-force-if-includes",
+                             "--no-follow-tags", "--no-prune", "--recurse-submodules=no"};
+            if (remoteRef.isEmpty()) args << "--set-upstream";
+            args << "--" << remote << fullRef + ':' + target;
+            modifyRepository(args, tr("Push completed"));
+        });
+    });
+}
+
+void Workspace::browseGitHub() {
+    if (!gitHubRepo_->isEnabled()) return;
+    gitBusy_ = true;
+    updateGitActions();
+    selectRemote({}, [this](const QString &remote) {
+        const auto directory = directory_;
+        runGit(mutationProcess_, gitRoot_, {"config", "--get", "remote." + remote + ".url"}, 16 * 1024,
+               [this, directory](QByteArray output, QString error, bool truncated) {
+            if (directory_ != directory) { finishGitAction(); return; }
+            const auto url = githubWebUrl(QString::fromUtf8(output).trimmed());
+            if (truncated || !error.isEmpty() || url.isEmpty()) {
+                finishGitAction(tr("This remote does not identify a github.com repository."));
+                return;
+            }
+            finishGitAction();
+            if (onGitHub) onGitHub(url);
+        });
+    });
 }
 
 void Workspace::prepareCommit() {

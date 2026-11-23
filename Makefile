@@ -25,6 +25,9 @@ endif
 .PHONY: all check bench
 all: $(BUILD)/interact-studio
 
+$(BUILD)/main.o: CPPFLAGS += -DINTERACT_STUDIO_VERSION='"$(file <VERSION)"'
+$(BUILD)/main.o: VERSION
+
 $(BUILD):
 	mkdir -p $@
 
@@ -37,19 +40,23 @@ $(BUILD)/test-%.o: tests/%.cpp | $(BUILD)
 $(BUILD)/interact-studio: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-TESTS := smoke editor_test languages_test terminal_test workspace_test customize_test buildrun_test definition_test liveserver_test
+TESTS := smoke editor_test languages_test terminal_test workspace_test workspace_git_test customize_test buildrun_test definition_test intellisense_test liveserver_test formatting_test catalog_test
 TEST_PROGRAMS := $(addprefix $(BUILD)/,$(TESTS))
 
 $(BUILD)/smoke: $(MODULES)
-$(BUILD)/editor_test $(BUILD)/editor_bench: $(BUILD)/editor.o $(BUILD)/languages.o
+$(BUILD)/editor_test $(BUILD)/editor_bench: $(BUILD)/editor.o $(BUILD)/languages.o $(BUILD)/catalog.o
 $(BUILD)/languages_test: $(BUILD)/languages.o
 $(BUILD)/terminal_test: $(BUILD)/terminal.o
 $(BUILD)/workspace_test: $(BUILD)/workspace.o $(BUILD)/quickopen.o
-$(BUILD)/customize_test: $(BUILD)/customize.o
+$(BUILD)/workspace_git_test: $(BUILD)/workspace.o
+$(BUILD)/customize_test: $(BUILD)/customize.o $(BUILD)/catalog.o
 $(BUILD)/customize_test: LDLIBS += -lQt5Test
 $(BUILD)/buildrun_test: $(BUILD)/buildrun.o
 $(BUILD)/definition_test: $(BUILD)/definition.o
+$(BUILD)/intellisense_test: $(BUILD)/intellisense.o
 $(BUILD)/liveserver_test: $(BUILD)/liveserver.o
+$(BUILD)/formatting_test: $(BUILD)/formatting.o $(BUILD)/languages.o
+$(BUILD)/catalog_test: $(BUILD)/catalog.o
 
 $(TEST_PROGRAMS) $(BUILD)/editor_bench: $(BUILD)/%: $(BUILD)/test-%.o
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@

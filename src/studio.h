@@ -1,4 +1,5 @@
 #pragma once
+#include "intellisense.h"
 #include <QMainWindow>
 #include <QFont>
 #include <QHash>
@@ -13,6 +14,7 @@ class Workspace;
 class QAction;
 class QDockWidget;
 class QLabel;
+class QListWidget;
 class QPlainTextEdit;
 class QToolButton;
 class QSplitter;
@@ -35,15 +37,19 @@ private:
     Workspace *navigator;
     Terminal *terminal = nullptr;
     LiveServer *live = nullptr;
-    QDockWidget *navDock, *termDock;
+    LanguageService *languageService;
+    QDockWidget *navDock, *termDock, *problemsDock;
+    QListWidget *problems;
     QSplitter *splitter;
     QPlainTextEdit *second = nullptr;
     QWidget *header;
     QToolButton *projectButton, *paletteButton, *liveButton;
-    QLabel *location, *position, *language, *logo;
+    QLabel *location, *position, *language, *logo, *saveStatus;
     QMenu *extensionMenu;
     QHash<QString, QAction*> actions;
     QHash<QString, QToolButton*> rail;
+    QHash<QString, QPair<int,QList<SemanticDiagnostic>>> diagnosticResults;
+    QString displayedProblemsPath;
     QString sidebarMode = "view.files";
     QColor accent;
     QFont codeFont;
@@ -60,13 +66,16 @@ private:
     void chooseProject();
     void rememberWorkspace();
     void showPalette();
-    void runTask();
+    void runTask(bool tests = false);
     void runCurrentFile();
     void startLive(QString path = {});
     void stopLive();
     void updateLiveControls();
     void navigateTo(QString path, int line, int column);
     void findDefinition();
+    void showProblems();
+    void showSignature();
+    void refreshProblems();
     void saveLayout();
     void loadLayout();
     void restoreLayoutDefaults();

@@ -1,75 +1,39 @@
 # Interact Studio
 
-IDE natif pour Windows et Linux, écrit en C++17 avec Qt Widgets. Son interface reprend la densité des éditeurs de bureau, avec des panneaux déplaçables, des commandes au clavier et des réglages que chaque utilisateur peut modifier.
+**Un IDE natif et léger pour Windows et Linux.** Éditez, lancez et partagez un projet dans une interface Qt compacte, avec des panneaux et des raccourcis que vous pouvez adapter.
 
-![Interact Studio avec son explorateur, son éditeur C++ et son terminal](docs/interact-studio.png)
+[![Builds Windows et Linux](https://github.com/KAYTAY10ok/interact-studio/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/KAYTAY10ok/interact-studio/actions/workflows/release.yml)
+[Licence GPL-3.0 ou ultérieure](LICENSE)
 
-## Télécharger
-
-Les [releases GitHub](https://github.com/KAYTAY10ok/interact-studio/releases) proposent un installateur et un ZIP portable pour Windows x64, ainsi qu’un paquet et une archive pour Debian 12 amd64. Le [guide d’installation](docs/installation.md) explique les prérequis et la vérification du téléchargement.
-
-## Compiler et lancer
-
-Sur la machine Codex Cloud Debian 13, préparez les en-têtes et le terminal sans droits administrateur.
-
-```sh
-./tools/cloud-setup.sh
-make -j2
-./build/interact-studio . src/main.cpp
-```
-
-Sur une distribution qui fournit Qt 5 et QTermWidget 5, installez le compilateur C++17, Make, pkg-config, les paquets de développement Qt 5 et QTermWidget 5, Git et ripgrep, puis utilisez les deux dernières commandes. Par exemple, sous Debian 12, les paquets sont `build-essential pkg-config qtbase5-dev libqtermwidget5-1-dev git ripgrep`.
-
-Sous Windows, ouvrez le terminal **MSYS2 UCRT64** puis compilez avec Qt 5 et CMake.
-
-```sh
-pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,qt5-base}
-cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/windows --parallel 2
-ctest --test-dir build/windows --output-on-failure
-./build/windows/InteractStudio.exe
-```
-
-## Travailler dans un projet
-
-| Raccourci par défaut | Action |
+| Système | Télécharger Interact Studio 0.2.0 |
 | --- | --- |
-| `Ctrl+P` | Trouver un fichier par son nom ou son chemin |
-| `Ctrl+Maj+P` | Ouvrir la palette des commandes |
-| `Ctrl+Maj+F` | Chercher du texte dans le projet |
-| `Ctrl+S` | Enregistrer le fichier |
-| `Ctrl+Espace` | Afficher les suggestions à la position du curseur |
-| `Tab` | Accepter la suggestion sélectionnée, ou indenter si la liste est fermée |
-| `F12` | Aller à la définition via `clangd` ou `rust-analyzer`, si installé |
-| `F5` | Compiler puis exécuter le fichier C++ ou Rust courant |
-| `Ctrl+Entrée` | Lancer une tâche du projet, par exemple `make` ou `cargo run` |
-| Ctrl + touche accent grave | Afficher ou masquer la console |
-| `Ctrl+,` | Ouvrir les préférences |
+| Windows 10/11 x64 | [Installateur .exe](https://github.com/KAYTAY10ok/interact-studio/releases/download/v0.2.0/InteractStudio-v0.2.0-windows-x86_64-setup.exe) · [ZIP portable](https://github.com/KAYTAY10ok/interact-studio/releases/download/v0.2.0/InteractStudio-v0.2.0-windows-x86_64.zip) |
+| Debian 12 amd64 | [Paquet .deb](https://github.com/KAYTAY10ok/interact-studio/releases/download/v0.2.0/interact-studio_0.2.0_amd64.deb) · [Archive portable](https://github.com/KAYTAY10ok/interact-studio/releases/download/v0.2.0/interact-studio-v0.2.0-linux-x86_64.tar.gz) |
 
-L’éditeur propose des onglets, une coloration syntaxique, une deuxième vue synchronisée sur le fichier actif, et la recherche par fichier. Il ouvre les textes UTF‑8 jusqu’à 16 Mio, préserve les fins de ligne et vérifie les modifications sur disque avant d’écraser un fichier. Pour un projet à plusieurs fichiers, lancez la commande de build du projet via **Run workspace task…**. **Build and run current file** cible les programmes autonomes et requiert un compilateur C++ ou `rustc`.
+[Guide d’installation](docs/installation.md) · [Notes de version et sommes SHA-256](https://github.com/KAYTAY10ok/interact-studio/releases/tag/v0.2.0) · [Compiler depuis les sources](docs/developpement.md)
 
-La coloration, l’indentation et les suggestions s’adaptent au langage détecté à l’ouverture. Dans **Explorer**, faites un clic droit pour créer, ouvrir, renommer ou supprimer un fichier, ou pour l’ouvrir avec **Live Server**. Le bouton **Go Live** dans la barre d’état ouvre la prévisualisation d’une page HTML. Voir le [guide de l’éditeur](docs/editor.md) pour le détail.
+![Capture de l’éditeur, de l’explorateur et de la console d’Interact Studio](docs/interact-studio.png)
 
-Le panneau **Source control** sépare les changements locaux et indexés. Utilisez **Stage** ou **Unstage** sur le fichier sélectionné. **Commit…** affiche les fichiers indexés et demande le message avant de créer le commit local. Le menu de connexions ouvre des sessions dans le terminal intégré.
+## Prise en main
 
-- **Branches et tags distants** via Git et le remote `origin`. **GitHub repository details** utilise séparément `gh`, avec une authentification GitHub et l’accès à `api.github.com`.
-- **Docker** utilise le moteur configuré dans le contexte Docker courant. Laissez le nom vide pour lister les conteneurs. Sélectionnez-en un pour y ouvrir un shell si `sh` y est installé.
-- **SSH / VM** utilise les hôtes ou alias de votre configuration SSH. Il ouvre un terminal sur une VM déjà accessible sur le réseau.
-- **WSL** lance `wsl.exe` lorsque Studio tourne dans WSL avec l’interopérabilité Windows et une interface graphique disponibles.
+1. Ouvrez votre dossier avec **File → Open workspace…**. **Explorer** permet de créer, renommer et ouvrir les fichiers.
+2. Appuyez sur `Ctrl+P` pour trouver un fichier et sur `Ctrl+Maj+P` pour lancer une commande. `Ctrl+Espace` affiche les suggestions et `Tab` accepte celle qui est sélectionnée.
+3. Utilisez **Source control** pour relire les changements, les indexer et les partager. Utilisez **Go Live** pour ouvrir une page HTML locale et la recharger quand les fichiers changent.
+4. Ouvrez **Preferences** avec `Ctrl+,` pour régler l’enregistrement, le clavier et l’apparence. Les panneaux sont déplaçables et les dispositions peuvent être nommées.
 
-## Personnaliser l’interface
+La coloration couvre 42 profils. Des serveurs locaux facultatifs enrichissent les suggestions et la navigation pour les langages pris en charge. Les extensions de Studio ajoutent des commandes et des réglages, tandis que les outils externes sont lancés à la demande.
 
-Déplacez, redimensionnez, masquez ou détachez les panneaux. Enregistrez plusieurs dispositions via **View → Save named layout…** et retrouvez-les via **Load named layout…**. Les préférences contrôlent la police, l’accent, les raccourcis (dont un profil Emacs) et la feuille de style Qt. Les extensions utilisateur ajoutent des commandes à la palette à partir de petits fichiers JSON. Consultez le [guide de personnalisation](docs/customization.md) et les [références de conception](docs/design.md).
+[Guide de l’éditeur](docs/editor.md) · [Git et GitHub](docs/git.md) · [Guide de personnalisation](docs/customization.md) · [Catalogue des extensions](docs/extensions.md)
 
-## Vérifier
+<details>
+<summary>Voir le catalogue d’extensions</summary>
 
-```sh
-make -j2 check
-make bench
-```
+![Catalogue d’extensions d’Interact Studio](docs/interact-extensions.png)
 
-Les tests Qt s’exécutent hors écran. Le benchmark mesure le traitement de 500 frappes simulées dans un fichier C++ de 5 000 lignes. Le temps d’affichage dépend de la machine et de son environnement graphique.
+</details>
 
-Linux intègre les sessions interactives dans un pseudo-terminal. Sous Windows, les shells interactifs s’ouvrent dans une console séparée et les tâches affichent leurs sorties dans Studio. Les extensions de commande JSON utilisent le terminal local. Les connexions SSH, Docker et WSL donnent accès à des shells. L’explorateur et les éditeurs travaillent avec les fichiers visibles depuis le système qui exécute Studio.
+Sous Linux, les sessions interactives s’affichent dans le terminal intégré. Sous Windows, les shells interactifs utilisent une console séparée et la sortie des tâches s’affiche dans Studio.
 
-Interact Studio est distribué sous licence [GPL-3.0 ou ultérieure](LICENSE).
+## Développement
+
+Studio est écrit en C++17 avec Qt Widgets. Les tests et le benchmark de frappe se lancent depuis les sources. Les résultats de performance dépendent de la machine et du projet. [Instructions de compilation et de test](docs/developpement.md) · [Procédure de publication](docs/publier.md)

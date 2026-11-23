@@ -6,9 +6,27 @@ Les modes couvrent notamment C/C++, Rust, Python, JavaScript et TypeScript avec 
 
 ## Suggestions et indentation
 
-Commencez à taper un mot dans l’éditeur ou appuyez sur `Ctrl+Espace` pour demander des suggestions. Choisissez avec les flèches, puis validez avec `Tab` ou `Entrée`. `Échap` ferme la liste. Les suggestions utilisent les mots du document, les mots-clés du langage et les extraits intégrés. La sélection de types et de membres à partir d’un projet entier nécessite un moteur d’analyse sémantique.
+Commencez à taper un mot dans l’éditeur ou appuyez sur `Ctrl+Espace` pour demander des suggestions. Choisissez avec les flèches, puis validez avec `Tab` ou `Entrée`. `Échap` ferme la liste. Les suggestions locales utilisent les mots du document, les mots-clés du langage et les extraits intégrés.
 
 `Entrée` reprend l’indentation de la ligne. Studio l’adapte au contexte reconnu, par exemple après une accolade ouvrante ou un deux-points Python. La complétion et l’indentation fonctionnent aussi dans la vue scindée.
+
+## Suggestions sémantiques et diagnostics
+
+Installez `clangd` pour C/C++ ou `rust-analyzer` pour Rust, puis ajoutez le serveur au `PATH`. Les suggestions sémantiques, les signatures et les diagnostics deviennent disponibles selon les capacités du serveur et la configuration du projet. Pour C/C++, un fichier `compile_commands.json` aide le serveur à utiliser les bonnes options de compilation.
+
+Utilisez `Ctrl+Maj+Espace` pour afficher une signature, `Ctrl+Maj+M` pour ouvrir **Problems** et `F12` pour aller à la définition. Double-cliquez sur un diagnostic pour aller à sa ligne. Des suggestions locales restent disponibles sans serveur de langage.
+
+## Enregistrement et récupération
+
+Dans **Preferences → Saving**, choisissez le délai ou désactivez l’enregistrement automatique. L’auto-save écrit les fichiers nommés après une pause. Si le contenu a changé sur disque depuis son ouverture, Studio protège la version externe et garde le brouillon.
+
+Après une interruption, ouvrez de nouveau le projet puis choisissez **File → Restore drafts…**. Les brouillons sont locaux et peuvent inclure des onglets sans nom. Relisez le brouillon avant de l’enregistrer.
+
+## Formatage et tests
+
+**Edit → Format document** (`Alt+Maj+F`) envoie le texte au formateur adapté. Installez l’outil voulu sur le `PATH`, par exemple `clang-format`, `rustfmt`, `gofmt`, `black`, `shfmt` ou `prettier`. Le résultat s’applique dans l’éditeur et peut être annulé.
+
+**Run → Run project tests…** propose une commande adaptée aux fichiers du projet, par exemple `cargo test` ou `npm test`. Vérifiez la commande avant de la lancer. Le résultat s’affiche dans la console.
 
 ## Fichiers et dossiers
 

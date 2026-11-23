@@ -1,15 +1,25 @@
 cmake_minimum_required(VERSION 3.18)
-project(InteractStudio VERSION 0.1.0 LANGUAGES CXX)
+set(version_file "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${version_file}")
+file(READ "${version_file}" studio_version)
+string(STRIP "${studio_version}" studio_version)
+if(NOT studio_version MATCHES [[^[0-9]+\.[0-9]+\.[0-9]+$]])
+    message(FATAL_ERROR "VERSION must contain a version of the form MAJOR.MINOR.PATCH")
+endif()
+project(InteractStudio VERSION "${studio_version}" LANGUAGES CXX)
 
 include(CTest)
 find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network)
 
 set(studio_sources
     src/buildrun.cpp
+    src/catalog.cpp
     src/customize.cpp
     src/definition.cpp
     src/editor.cpp
+    src/formatting.cpp
     src/icons.cpp
+    src/intellisense.cpp
     src/languages.cpp
     src/liveserver.cpp
     src/quickopen.cpp
@@ -48,6 +58,7 @@ else()
     add_executable(interact-studio src/main.cpp)
 endif()
 target_link_libraries(interact-studio PRIVATE studio_core)
+target_compile_definitions(interact-studio PRIVATE INTERACT_STUDIO_VERSION="${PROJECT_VERSION}")
 studio_warnings(interact-studio)
 
 if(BUILD_TESTING)
@@ -57,7 +68,7 @@ if(BUILD_TESTING)
     studio_warnings(studio-desktop-test)
     add_test(NAME desktop-launch COMMAND studio-desktop-test)
     set_tests_properties(desktop-launch PROPERTIES TIMEOUT 20)
-    foreach(module IN ITEMS editor languages liveserver)
+    foreach(module IN ITEMS catalog editor formatting intellisense languages liveserver workspace_git)
         add_executable(studio-${module}-test tests/${module}_test.cpp)
         target_link_libraries(studio-${module}-test PRIVATE studio_core)
         studio_warnings(studio-${module}-test)

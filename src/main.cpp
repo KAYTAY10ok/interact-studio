@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName("Interact Studio");
     app.setOrganizationName("InteractStudio");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion(QStringLiteral(INTERACT_STUDIO_VERSION));
     app.setStyle("Fusion");
 
     QCommandLineParser parser;

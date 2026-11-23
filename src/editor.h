@@ -1,7 +1,10 @@
 #pragma once
 
+#include "intellisense.h"
+
 #include <QTabWidget>
 #include <functional>
+#include <memory>
 
 class QPlainTextEdit;
 class EditorPage;
@@ -9,6 +12,7 @@ class EditorPage;
 class Editor : public QTabWidget {
 public:
     explicit Editor(QWidget *parent = nullptr);
+    ~Editor() override;
     bool openFile(QString path, bool reportError = true);
     void newFile();
     bool save();
@@ -28,7 +32,19 @@ public:
     void completeWord();
     void goToLine();
     void setEditorFont(const QFont &font);
+    void setAutosaveEnabled(bool enabled, int delayMs = 1500);
+    void setRecoveryWorkspace(const QString &path);
+    bool hasRecoverableDrafts() const;
+    void showRecovery();
+    bool canSwitchProjectFiles() const;
+    void reloadWorkspaceFiles();
+    LanguageSnapshot currentSnapshot() const;
+    void setDiagnostics(QString path, int revision, QList<SemanticDiagnostic> diagnostics);
     std::function<void()> onStateChanged;
+    std::function<void(QString)> onAutosaveStatus;
+    std::function<void(const LanguageSnapshot &, std::function<void(QList<SemanticCompletion>)>, bool)> onCompletionRequested;
+    std::function<void(const LanguageSnapshot &)> onBufferChanged;
+    std::function<void(QString)> onBufferClosed;
 
 private:
     EditorPage *page(int index) const;
@@ -37,6 +53,12 @@ private:
     bool writePage(EditorPage *tab, bool chooseName);
     bool mayClose(EditorPage *tab);
     void closePage(int index);
+    void scheduleBackground();
+    void runBackground();
+    void cancelBackground(EditorPage *tab);
+    void removeDraft(EditorPage *tab);
+    struct BackgroundState;
+    std::unique_ptr<BackgroundState> background;
     QFont editorFont;
     int untitledNumber = 0;
 };

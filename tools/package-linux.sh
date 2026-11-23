@@ -51,7 +51,7 @@ copy_docs() {
     install -d "$dest"
     install -m 644 README.md "$dest/"
     install -d "$dest/docs"
-    install -m 644 docs/*.md docs/interact-studio.png "$dest/docs/"
+    install -m 644 docs/*.md docs/*.png "$dest/docs/"
     if [[ -f "docs/releases/$tag.md" ]]; then
         install -d "$dest/docs/releases"
         install -m 644 "docs/releases/$tag.md" "$dest/docs/releases/"

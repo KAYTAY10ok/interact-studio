@@ -6,7 +6,10 @@
 #include "icons.h"
 #include "quickopen.h"
 #include "buildrun.h"
+#include "catalog.h"
 #include "definition.h"
+#include "formatting.h"
+#include "intellisense.h"
 #include "languages.h"
 #include "liveserver.h"
 #include <algorithm>
@@ -76,6 +79,14 @@ StudioWindow::StudioWindow(QString root) : accent("#e0ae69") {
     termDock->setObjectName("terminalDock");
     addDockWidget(Qt::BottomDockWidgetArea,termDock);
     termDock->hide();
+    problemsDock = new QDockWidget(tr("Problems"),this);
+    problemsDock->setObjectName("problemsDock");
+    problems = new QListWidget;
+    problems->setAccessibleName(tr("Language diagnostics"));
+    problemsDock->setWidget(problems);
+    addDockWidget(Qt::BottomDockWidgetArea, problemsDock);
+    tabifyDockWidget(termDock, problemsDock);
+    problemsDock->hide();
     buildActions();
     buildChrome();
     restoreLayoutDefaults();
@@ -83,6 +94,7 @@ StudioWindow::StudioWindow(QString root) : accent("#e0ae69") {
     restoreGeometry(config.value("window/geometry").toByteArray());
     bool restored = restoreState(config.value("window/docks").toByteArray(), layoutVersion);
     setProject(std::move(root));
+    languageService = new LanguageService(project,this);
     if (restored && !termDock->isHidden()) showTerminal();
 
     navigator->onOpen = [this](QString path){openFile(path);};
@@ -98,6 +110,53 @@ StudioWindow::StudioWindow(QString root) : accent("#e0ae69") {
     navigator->onOpenLine = [this](QString path, int line){
         navigateTo(path, line - 1, 0);
     };
+    navigator->beforeCheckout = [this]{
+        if (tabs->canSwitchProjectFiles()) return true;
+        QMessageBox::information(this,tr("Unsaved files"),
+            tr("Save or close the modified editors before changing the working tree."));
+        return false;
+    };
+    navigator->onCheckout = [this]{tabs->reloadWorkspaceFiles();};
+    navigator->onGitHub = [](QString url){QDesktopServices::openUrl(QUrl(url));};
+    navigator->onGitCommand = [this](QString program,QStringList args){
+        auto *console = showTerminal();
+        if (program == "gh" && args.mid(0,2) == QStringList{"auth","login"})
+            console->launchInteractiveCommand(program,args);
+        else
+            console->launchCommand(program,args);
+    };
+    tabs->onCompletionRequested = [this](const LanguageSnapshot& snapshot, auto reply, bool explicitRequest){
+        languageService->complete(snapshot,std::move(reply),explicitRequest);
+    };
+    tabs->onBufferChanged = [this](const LanguageSnapshot& snapshot){
+        languageService->update(snapshot);
+        if (problemsDock->isVisible() && snapshot.path == tabs->currentPath()) refreshProblems();
+    };
+    tabs->onBufferClosed = [this](QString path) {
+        languageService->closeDocument(path);
+        diagnosticResults.remove(path);
+    };
+    languageService->onDiagnostics = [this](QString path, int revision, QList<SemanticDiagnostic> items) {
+        tabs->setDiagnostics(path,revision,items);
+        diagnosticResults.insert(path,{revision,std::move(items)});
+        if (problemsDock->isVisible() && path == tabs->currentPath()) refreshProblems();
+    };
+    languageService->onStatus = [this](QString text) {statusBar()->showMessage(text,4500);};
+    connect(problems,&QListWidget::itemActivated,this,[this](QListWidgetItem* item){
+        if (!item->data(Qt::UserRole).isValid()) return;
+        navigateTo(item->data(Qt::UserRole).toString(),item->data(Qt::UserRole+1).toInt(),
+                   item->data(Qt::UserRole+2).toInt());
+    });
+    connect(problemsDock,&QDockWidget::visibilityChanged,this,[this](bool visible) {
+        if (visible) refreshProblems();
+    });
+    tabs->onAutosaveStatus = [this](QString text) {saveStatus->setText(text);};
+    customize->onAutosave = [this](bool enabled,int delay){
+        tabs->setAutosaveEnabled(enabled,delay);
+        saveStatus->setText(enabled ? tr("Auto Save") : tr("Manual Save"));
+    };
+    customize->setWorkspace(project);
+    tabs->setRecoveryWorkspace(project);
     customize->onAppearance = [this](QFont font,QColor color){applyAppearance(font,color);};
     customize->onRun = [this](QString program,QStringList args){showTerminal()->launchCommand(program,args);};
     customize->onExtensionsChanged = [this]{
@@ -132,10 +191,20 @@ StudioWindow::StudioWindow(QString root) : accent("#e0ae69") {
     if (config.value("window/split",false).toBool()) toggleSplit();
     splitter->restoreState(config.value("window/editorSizes").toByteArray());
     syncState();
+    if (tabs->hasRecoverableDrafts()) {
+        statusBar()->showMessage(tr("Recoverable edits found. Choose File → Restore drafts…"),8000);
+    }
 }
 
 StudioWindow::~StudioWindow() {
     tabs->onStateChanged = {};
+    tabs->onCompletionRequested = {};
+    tabs->onBufferChanged = {};
+    tabs->onBufferClosed = {};
+    tabs->onAutosaveStatus = {};
+    languageService->onDiagnostics = {};
+    languageService->onStatus = {};
+    delete languageService;
     // The dock and its children outlive C++ member fields during QWidget teardown.
     for (auto *object : findChildren<QObject*>()) disconnect(object,nullptr,this,nullptr);
 }
@@ -161,14 +230,21 @@ void StudioWindow::buildActions() {
     command("file.folder",tr("Open workspace…"),"Ctrl+Shift+O",[this]{chooseProject();});
     command("file.save",tr("Save file"),"Ctrl+S",[this]{tabs->save();});
     command("file.saveAs",tr("Save as…"),"Ctrl+Shift+S",[this]{tabs->saveAs();});
+    command("file.restoreDrafts",tr("Restore drafts…"),"",[this]{tabs->showRecovery();});
     command("file.close",tr("Close editor"),"Ctrl+W",[this]{tabs->closeCurrent();});
     command("app.quit",tr("Close window"),"Ctrl+Q",[this]{close();});
     command("edit.find",tr("Find in file"),"Ctrl+F",[this]{tabs->findText();});
     command("edit.goto",tr("Go to line…"),"Ctrl+G",[this]{tabs->goToLine();});
     command("edit.definition",tr("Go to definition"),"F12",[this]{findDefinition();});
+    command("edit.signature",tr("Show signature help"),"Ctrl+Shift+Space",[this]{showSignature();});
+    command("edit.format",tr("Format document"),"Shift+Alt+F",[this]{
+        auto *view = second && second->hasFocus() ? second : tabs->currentText();
+        formatDocument(this,view,tabs->currentPath(),[this](QString text){statusBar()->showMessage(text,5500);});
+    });
     command("view.files",tr("Explorer"),"Ctrl+Shift+E",[this]{selectSidebar("view.files");});
     command("view.search",tr("Search workspace"),"Ctrl+Shift+F",[this]{selectSidebar("view.search");});
     command("view.git",tr("Source control"),"Ctrl+Shift+G",[this]{selectSidebar("view.git");});
+    command("view.problems",tr("Show problems"),"Ctrl+Shift+M",[this]{showProblems();});
     command("view.sidebar",tr("Toggle sidebar"),"Ctrl+B",[this]{navDock->setVisible(navDock->isHidden());});
     command("view.split",tr("Split editor"),"Ctrl+\\",[this]{toggleSplit();});
     command("view.reset",tr("Restore default layout"),"",[this]{restoreLayoutDefaults();});
@@ -188,6 +264,7 @@ void StudioWindow::buildActions() {
     command("connect.wsl",tr("WSL shell"),"",[this]{showTerminal()->launchWsl();});
     command("connect.ssh",tr("SSH host or VM…"),"",[this]{showTerminal()->launchSsh();});
     command("task.run",tr("Run workspace task…"),"Ctrl+Return",[this]{runTask();});
+    command("task.test",tr("Run project tests…"),"",[this]{runTask(true);});
     command("task.runFile",tr("Build and run current file"),"F5",[this]{runCurrentFile();});
     command("live.start",tr("Open with Live Server"),"",[this]{startLive();});
     command("live.copyUrl",tr("Copy Live Server URL"),"",[this]{
@@ -199,6 +276,10 @@ void StudioWindow::buildActions() {
     command("live.stop",tr("Stop Live Server"),"",[this]{stopLive();})->setEnabled(false);
     command("app.palette",tr("Command palette"),"Ctrl+Shift+P",[this]{showPalette();});
     command("app.preferences",tr("Preferences…"),"Ctrl+,",[this]{customize->configure();});
+    command("app.reloadSettings",tr("Reload settings from disk"),"",[this]{customize->reload();});
+    command("extensions.catalog",tr("Browse extensions…"),"",[this]{
+        showExtensionCatalog(this,[this]{customize->reload();});
+    });
     command("extensions.reload",tr("Reload command extensions"),"",[this]{
         customize->reload(); statusBar()->showMessage(tr("Extension commands reloaded"),2200);
     });
@@ -220,10 +301,10 @@ void StudioWindow::buildChrome() {
         for (const auto& id : ids) if (id.isEmpty()) m->addSeparator(); else m->addAction(actions[id]);
         return m;
     };
-    menu(tr("&File"),{"file.new","file.quickOpen","file.open","file.folder","","file.save","file.saveAs","file.close","","app.quit"});
-    menu(tr("&Edit"),{"edit.find","edit.goto","edit.definition","edit.complete","","app.preferences"});
-    menu(tr("&View"),{"app.palette","view.files","view.search","view.git","","view.split","view.sidebar","terminal.toggle","","view.saveLayout","view.loadLayout","view.reset"});
-    menu(tr("&Run"),{"task.runFile","task.run","live.start","live.copyUrl","live.stop","","terminal.local","connect.remoteRefs","connect.github","connect.docker","connect.wsl","connect.ssh"});
+    menu(tr("&File"),{"file.new","file.quickOpen","file.open","file.folder","","file.save","file.saveAs","file.restoreDrafts","file.close","","app.quit"});
+    menu(tr("&Edit"),{"edit.find","edit.goto","edit.definition","edit.complete","edit.signature","edit.format","","app.preferences","app.reloadSettings"});
+    menu(tr("&View"),{"app.palette","view.files","view.search","view.git","view.problems","","view.split","view.sidebar","terminal.toggle","","view.saveLayout","view.loadLayout","view.reset"});
+    menu(tr("&Run"),{"task.runFile","task.run","task.test","live.start","live.copyUrl","live.stop","","terminal.local","connect.remoteRefs","connect.github","connect.docker","connect.wsl","connect.ssh"});
     extensionMenu = menus->addMenu(tr("E&xtensions")); top->addWidget(menus);
     top->addStretch();
     paletteButton = new QToolButton;
@@ -290,6 +371,9 @@ void StudioWindow::buildChrome() {
     }
     auto *studio = new QLabel("  INTERACT"); studio->setObjectName("statusBrand");
     statusBar()->addWidget(studio);
+    saveStatus = new QLabel;
+    saveStatus->setTextFormat(Qt::PlainText);
+    statusBar()->addPermanentWidget(saveStatus);
     position = new QLabel; language = new QLabel;
     statusBar()->addPermanentWidget(language); statusBar()->addPermanentWidget(position);
     liveButton = new QToolButton;
@@ -376,6 +460,7 @@ void StudioWindow::syncState() {
     QString title = (path.isEmpty()?label:QFileInfo(path).fileName()) +
             (text && text->document()->isModified()?" *":"") + "   —   " + projectName(project) + "   ·   Interact Studio";
     if (windowTitle()!=title) setWindowTitle(title);
+    if (problemsDock->isVisible() && displayedProblemsPath != path) refreshProblems();
 }
 
 void StudioWindow::setProject(QString path) {
@@ -425,9 +510,13 @@ void StudioWindow::restoreLayoutDefaults() {
     termDock->setFloating(false);
     addDockWidget(Qt::LeftDockWidgetArea,navDock);
     addDockWidget(Qt::BottomDockWidgetArea,termDock);
+    problemsDock->setFloating(false);
+    addDockWidget(Qt::BottomDockWidgetArea,problemsDock);
+    tabifyDockWidget(termDock,problemsDock);
     resizeDocks({navDock},{240},Qt::Horizontal);
     resizeDocks({termDock},{230},Qt::Vertical);
     termDock->hide();
+    problemsDock->hide();
     if (second) toggleSplit();
     selectSidebar("view.files");
 }
@@ -476,22 +565,31 @@ void StudioWindow::showPalette() {
         available[list->currentItem()->data(Qt::UserRole).toInt()]->trigger();
 }
 
-void StudioWindow::runTask() {
+void StudioWindow::runTask(bool tests) {
     QSettings config;
-    QString previous = config.value(settingsKey+"task").toString();
+    const QString key = settingsKey+(tests?"testTask":"task");
+    QString previous = config.value(key).toString();
     if (previous.isEmpty()) {
         QDir dir(project);
-        if (dir.exists("Makefile")) previous="make";
-        else if (dir.exists("Cargo.toml")) previous="cargo run";
-        else if (dir.exists("package.json")) previous="npm run build";
+        if (tests) {
+            if (dir.exists("Cargo.toml")) previous = "cargo test";
+            else if (dir.exists("package.json")) previous = "npm test";
+            else if (dir.exists("go.mod")) previous = "go test ./...";
+            else if (dir.exists("pytest.ini") || dir.exists("pyproject.toml")) previous = "python -m pytest";
+            else if (dir.exists("Makefile")) previous = "make test";
+        } else {
+            if (dir.exists("Makefile")) previous="make";
+            else if (dir.exists("Cargo.toml")) previous="cargo run";
+            else if (dir.exists("package.json")) previous="npm run build";
+        }
     }
     bool ok = false;
-    const QString line = QInputDialog::getText(this,tr("Run workspace task"),
+    const QString line = QInputDialog::getText(this, tests ? tr("Run project tests") : tr("Run workspace task"),
                 tr("Program and arguments in %1").arg(projectName(project)),QLineEdit::Normal,previous,&ok);
     if (!ok || line.trimmed().isEmpty()) return;
     QStringList args = QProcess::splitCommand(line);
     if (args.isEmpty()) return;
-    config.setValue(settingsKey+"task",line);
+    config.setValue(key,line);
     const auto program = args.takeFirst();
     showTerminal()->launchCommand(program,args);
 }
@@ -565,6 +663,58 @@ void StudioWindow::findDefinition() {
     goToDefinition(this, project, tabs->currentPath(), view->toPlainText(),
                    cursor.blockNumber(), cursor.positionInBlock(),
                    [this](QString path, int line, int column) { navigateTo(path,line,column); });
+}
+
+void StudioWindow::refreshProblems() {
+    const auto path = tabs->currentPath();
+    displayedProblemsPath = path;
+    problems->clear();
+    const auto *view = tabs->currentText();
+    if (!view || path.isEmpty()) {
+        problems->addItem(tr("Open a C, C++ or Rust file to analyze it."));
+        return;
+    }
+    const auto state = diagnosticResults.constFind(path);
+    if (state == diagnosticResults.cend() || state->first != view->document()->revision()) {
+        problems->addItem(tr("Waiting for diagnostics for the active file."));
+        return;
+    }
+    if (state->second.isEmpty()) {
+        problems->addItem(tr("No problems reported for this file."));
+        return;
+    }
+    for (const auto &diagnostic : state->second) {
+        const QString preview = diagnostic.message.simplified();
+        const QString level = diagnostic.severity == 1 ? tr("Error") :
+            diagnostic.severity == 2 ? tr("Warning") : tr("Note");
+        auto *item = new QListWidgetItem(tr("%1 · %2:%3   %4")
+            .arg(level).arg(diagnostic.startLine+1).arg(diagnostic.startColumn+1).arg(preview),problems);
+        item->setToolTip(diagnostic.message);
+        item->setData(Qt::UserRole,path);
+        item->setData(Qt::UserRole+1,diagnostic.startLine);
+        item->setData(Qt::UserRole+2,diagnostic.startColumn);
+    }
+}
+
+void StudioWindow::showProblems() {
+    problemsDock->show();
+    problemsDock->raise();
+    refreshProblems();
+    languageService->analyze(tabs->currentSnapshot());
+}
+
+void StudioWindow::showSignature() {
+    const auto snapshot = tabs->currentSnapshot();
+    if (snapshot.path.isEmpty()) return;
+    languageService->signature(snapshot,[this,snapshot](QString label) {
+        auto *view = second && second->hasFocus() ? second : tabs->currentText();
+        if (label.isEmpty() || !view || tabs->currentPath() != snapshot.path ||
+                view->document()->revision() != snapshot.revision) return;
+        const auto cursor = view->textCursor();
+        if (cursor.blockNumber() != snapshot.line || cursor.positionInBlock() != snapshot.column) return;
+        QToolTip::showText(view->mapToGlobal(view->cursorRect().bottomLeft()),
+                           QString("<pre>%1</pre>").arg(label.toHtmlEscaped()), view);
+    });
 }
 
 void StudioWindow::saveLayout() {

@@ -4,7 +4,9 @@
 #include <QApplication>
 #include <QCompleter>
 #include <QDebug>
+#include <QDialog>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QKeyEvent>
@@ -13,6 +15,7 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTextBlock>
+#include <QThread>
 #include <QTimer>
 #include <cstdlib>
 
@@ -47,11 +50,95 @@ void key(QWidget *widget, int code, const QString &text = {}) {
     QKeyEvent event(QEvent::KeyPress,code,Qt::NoModifier,text);
     QApplication::sendEvent(widget,&event);
 }
+
+bool await(const std::function<bool()> &condition) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!condition() && elapsed.elapsed() < 4000) {
+        QApplication::processEvents();
+        QThread::msleep(10);
+    }
+    return condition();
+}
+
+int autosaveAndRecovery(const QTemporaryDir &dir) {
+    const auto workspace = dir.filePath("recovery-project");
+    if (!QDir().mkpath(workspace)) return fail("Unable to create recovery workspace");
+    qputenv("XDG_DATA_HOME",QFile::encodeName(dir.filePath("private-data")));
+    const auto file = workspace + "/auto.cpp";
+    const QByteArray original = QByteArray::fromHex("efbbbf") + "// v1\r\n";
+    if (!writeFile(file,original)) return fail("Unable to create auto-save test file");
+    {
+        Editor writer;
+        writer.setRecoveryWorkspace(workspace);
+        writer.setAutosaveEnabled(true,200);
+        if (!writer.openFile(file)) return fail("Unable to open auto-save test file");
+        auto *text = writer.currentText();
+        text->moveCursor(QTextCursor::End);
+        text->insertPlainText("// v2\n");
+        if (!await([&] { return !text->document()->isModified(); }) ||
+            readFile(file) != original + "// v2\r\n" || writer.hasRecoverableDrafts())
+            return fail("Auto-save lost the encoding, line endings or modified state");
+        QString status;
+        writer.onAutosaveStatus = [&](QString message) { status = message; };
+        text->insertPlainText("// unsaved");
+        if (!writeFile(file,"external") || !await([&] { return status.contains("paused"); }) ||
+            readFile(file) != "external" || !text->document()->isModified() ||
+            QApplication::activeModalWidget() || !writer.hasRecoverableDrafts())
+            return fail("Auto-save did not preserve an external change and its recovery copy");
+    }
+    {
+        Editor reader;
+        reader.setRecoveryWorkspace(workspace);
+        reader.setAutosaveEnabled(true,200);
+        if (!reader.hasRecoverableDrafts()) return fail("The recovery copy did not survive closing the editor");
+        QTimer::singleShot(0, [] {
+            if (auto *prompt = qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+                prompt->accept();
+        });
+        reader.showRecovery();
+        if (!reader.currentText() || !reader.currentPath().isEmpty() ||
+            !reader.currentText()->toPlainText().endsWith("// unsaved") ||
+            !reader.currentText()->document()->isModified() || readFile(file) != "external")
+            return fail("Recovering a conflict changed the original file or failed to expose edits");
+        bool closeSeen = false;
+        QTimer::singleShot(0, [&] {
+            if (auto *prompt = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                closeSeen = true;
+                prompt->button(QMessageBox::Discard)->click();
+            }
+        });
+        reader.closeCurrent();
+        if (!closeSeen || reader.hasRecoverableDrafts()) return fail("Discarding a recovered tab left a draft behind");
+    }
+    {
+        Editor untitled;
+        untitled.setRecoveryWorkspace(workspace);
+        untitled.newFile();
+        untitled.currentText()->setPlainText("untitled after a crash");
+        untitled.currentText()->document()->setModified(true);
+        if (!await([&] { return untitled.hasRecoverableDrafts(); }))
+            return fail("An untitled buffer did not get a recovery copy");
+    }
+    {
+        Editor restart;
+        restart.setRecoveryWorkspace(workspace);
+        QTimer::singleShot(0, [] {
+            if (auto *prompt = qobject_cast<QDialog *>(QApplication::activeModalWidget())) prompt->accept();
+        });
+        restart.showRecovery();
+        if (!restart.currentText() || restart.currentText()->toPlainText() != "untitled after a crash")
+            return fail("An untitled recovery copy could not be restored");
+        auto *text = restart.currentText();
+        text->document()->setModified(false);
+    }
+    return 0;
+}
 }
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    QTimer::singleShot(10000, [] {
+    QTimer::singleShot(18000, [] {
         qCritical() << "Editor test timed out in a modal dialog";
         std::_Exit(2);
     });
@@ -173,6 +260,34 @@ int main(int argc, char **argv) {
     if (editor.openPaths().contains(moved + "/index.html"))
         return fail("Deleted document was not closed");
 
-    qInfo() << "PASS: safe file edits, completion with Tab and undo, snippets, split auto-indent, explorer renames";
+    const auto types = dir.filePath("semantic.cpp");
+    if (!writeFile(types,"auto x = object.siz;") || !editor.openFile(types))
+        return fail("Unable to open semantic completion fixture");
+    view = editor.currentText();
+    cursor = view->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.movePosition(QTextCursor::PreviousCharacter);
+    view->setTextCursor(cursor);
+    editor.activateWindow();
+    view->setFocus();
+    QApplication::processEvents();
+    using CompletionReply = std::function<void(QList<SemanticCompletion>)>;
+    CompletionReply reply;
+    editor.onCompletionRequested = [&](const LanguageSnapshot &snapshot, CompletionReply callback, bool explicitRequest) {
+        if (snapshot.path == types && snapshot.line == 0 && snapshot.column == 19 && explicitRequest)
+            reply = std::move(callback);
+    };
+    editor.completeWord();
+    if (!reply) return fail("The editor did not request semantic completion at the cursor");
+    reply({{"size", "member", "size()", 0, 16, 0, 19}});
+    completion = view->findChild<QCompleter *>();
+    if (!completion || !completion->currentCompletion().startsWith("size"))
+        return fail("The semantic result did not reach the editor popup");
+    key(completion->popup(),Qt::Key_Tab,"\t");
+    if (view->toPlainText() != "auto x = object.size();")
+        return fail("The semantic insertion did not honor its precise edit range");
+
+    if (autosaveAndRecovery(dir) != 0) return 1;
+    qInfo() << "PASS: safe file edits, suggestions, indentation, explorer renames, auto-save and conflict/task recovery";
     return 0;
 }
